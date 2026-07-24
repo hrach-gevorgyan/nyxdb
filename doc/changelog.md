@@ -108,3 +108,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   of just resubscribing and hoping. Verified at 50 subscribers/8000 docs
   and 80 subscribers/15,000 docs with zero missed changes at either
   scale. Dropped the now-unused `tokio-stream` dependency.
+- Added differential testing against real CouchDB (`test/differential/run.js`,
+  plan §6.2) — the last Phase 3 item. Drives both servers with identical
+  `new_edits:false` pushes using explicit shared rev ids on both sides,
+  so the comparison isolates conflict/winner-picking logic rather than
+  the two servers' different hash algorithms. Builds a tree with a
+  conflict, a deeper-generation resolution, a deletion, and a
+  recreation, then diffs winning rev, `_conflicts`, `_changes` content,
+  and `_revs_diff`. Verified against a real local CouchDB 3.5.2 —
+  everything matched exactly on the first run. This closes out Phase 3.

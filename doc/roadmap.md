@@ -50,7 +50,7 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
       `live:true` can resume from `since=<checkpoint>` without a full
       re-sync
 
-## Phase 3 — Hardening
+## Phase 3 — Hardening (done)
 - [x] Auth (HTTP Basic, random per-install credentials or
       `COUCHDB_CLONE_USER`/`COUCHDB_CLONE_PASSWORD`; required on every
       route except `GET /`; verified via curl — public root, 401 with no
@@ -69,7 +69,14 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
       the continuous stream re-catch-up from storage on lag instead of
       silently continuing. Verified up to 80 concurrent subscribers /
       15,000 docs with zero missed changes.
-- [ ] Differential testing vs. real CouchDB as a standing pre-release gate
+- [x] Differential testing vs. real CouchDB (`test/differential/run.js`,
+      plan §6.2). Drives both servers with identical `new_edits:false`
+      pushes (explicit shared rev ids, so the comparison isolates
+      conflict/winner-picking logic rather than hash-algorithm
+      differences) building a tree with a conflict, a deeper-generation
+      resolution, a deletion, and a recreation. Verified against a real
+      local CouchDB 3.5.2: winning rev, `_conflicts`, `_changes` content,
+      and `_revs_diff` all matched exactly on first run.
 
 ## Phase 4 — Only if actually needed
 - [ ] Attachments
@@ -77,9 +84,11 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
 - [ ] `_session` cookie auth
 
 ## Status
-Phase 0, 1, and 2 complete. Phase 3: auth, CORS, and load/soak testing
-done — the last of which caught and fixed a real correctness bug
-(silently dropped changes under load, see changelog). Still plaintext
-HTTP, so keep it on a trusted LAN until TLS is decided
-(doc/open-questions.md). Remaining: differential testing vs. real
-CouchDB.
+Phases 0 through 3 all complete. Along the way, both load testing and
+differential testing against real CouchDB caught/confirmed real things
+(a dropped-changes bug under load, and — reassuringly — exact agreement
+with real CouchDB's conflict/winner-picking behavior). Still plaintext
+HTTP, so keep this on a trusted LAN until TLS is decided
+(doc/open-questions.md). Everything remaining (Phase 4: attachments,
+Mango, session auth) is explicitly "only if actually needed" — no known
+concrete need yet, so nothing is planned there without one.
