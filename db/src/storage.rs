@@ -40,6 +40,31 @@ impl Db {
         Ok(seq)
     }
 
+    /// `_changes?since=N` support: every `(seq, doc_id)` entry with
+    /// `seq > since`, in order. Multiple entries can name the same
+    /// `doc_id` (each write appends one) — callers dedupe, keeping the
+    /// highest seq per doc, same as real CouchDB's `_changes` semantics.
+    pub fn changes_since(&self, since: u64) -> sled::Result<Vec<(u64, String)>> {
+        let start = (since + 1).to_be_bytes();
+        self.seq_log
+            .range(start..)
+            .map(|entry| {
+                let (seq_bytes, doc_id_bytes) = entry?;
+                let seq = u64::from_be_bytes(seq_bytes.as_ref().try_into().unwrap());
+                let doc_id = String::from_utf8(doc_id_bytes.to_vec()).expect("doc id must be utf8");
+                Ok((seq, doc_id))
+            })
+            .collect()
+    }
+
+    pub fn current_seq(&self) -> sled::Result<u64> {
+        Ok(self
+            .meta
+            .get("update_seq")?
+            .map(|b| u64::from_be_bytes(b.as_ref().try_into().unwrap()))
+            .unwrap_or(0))
+    }
+
     fn next_seq(&self) -> sled::Result<u64> {
         let seq = self
             .meta

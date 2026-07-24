@@ -31,12 +31,24 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
       404s with `reason:"deleted"` instead of returning its tombstone
       body with 200.
 
-## Phase 2 — Live replication
-- [ ] `_changes` normal mode
-- [ ] `_changes?feed=longpoll`
-- [ ] `_changes?feed=continuous`
-- [ ] `_local` checkpoint docs
-- [ ] Verify `live:true` resumes correctly after restart
+## Phase 2 — Live replication (done)
+- [x] `_changes` normal mode (`since`, `style=all_docs`, dedupe to one
+      row per doc keeping the latest seq)
+- [x] `_changes?feed=longpoll` (subscribes, waits for an event or
+      timeout, then re-derives from storage — never trusts a single
+      event in case writes coalesced during the wait)
+- [x] `_changes?feed=continuous` (catch-up rows, then live rows streamed
+      as newline-delimited JSON via a per-db broadcast channel)
+- [x] Every write path (`put_doc`, both `_bulk_docs` modes) publishes to
+      the doc's `ChangeFeed`
+- [x] `_local` checkpoint docs (already existed from Phase 0, now
+      exercised for real by the live sync test below)
+- [x] Verified: real two-device `db.sync({live:true, retry:true})`
+      converges both directions (`test/integration/live_sync.js`)
+- [x] Verified: doc, `_local` checkpoint, and `_changes` sequence numbers
+      all survive a server restart (manual HTTP test) — confirms
+      `live:true` can resume from `since=<checkpoint>` without a full
+      re-sync
 
 ## Phase 3 — Hardening
 - [ ] Auth (HTTP Basic, random per-install credentials)
@@ -50,6 +62,8 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
 - [ ] `_session` cookie auth
 
 ## Status
-Phase 0 and Phase 1 complete. Starting Phase 2 next: `_changes` feed
-(normal, longpoll, continuous) and `_local` checkpoint round-tripping
-for real `live:true` resumable sync.
+Phase 0, 1, and 2 complete. This is the point where the server can
+genuinely be pointed at a real app for `db.sync({live:true})` testing
+(see doc/open-questions.md — auth is not wired in yet, so keep this on a
+trusted network only until Phase 3). Next: minimal HTTP Basic auth, then
+the rest of Phase 3 hardening.

@@ -1,3 +1,4 @@
+use couchdb_clone::changes::ChangeFeedRegistry;
 use couchdb_clone::routes::{build_router, AppState};
 use std::sync::Arc;
 use tower_http::normalize_path::NormalizePathLayer;
@@ -9,7 +10,7 @@ async fn main() {
     let data_dir = std::env::var("COUCHDB_CLONE_DATA").unwrap_or_else(|_| "./data".into());
     let root = Arc::new(sled::open(&data_dir).expect("failed to open sled database"));
 
-    let app = build_router(AppState { root });
+    let app = build_router(AppState { root, feeds: ChangeFeedRegistry::default() });
     // PouchDB's http adapter requests db/doc URLs with a trailing slash
     // (e.g. `GET /{db}/`); trim it so those still match our routes.
     let app = tower::ServiceBuilder::new()

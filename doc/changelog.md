@@ -58,3 +58,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   nonexistent id, and a bogus `rev` on a real id all report correctly.
   This closes out Phase 1 — full unit suite (14 tests) and the PouchDB
   integration test both still pass.
+- Phase 2 complete: `GET /{db}/_changes` in all three delivery modes
+  (normal, `feed=longpoll`, `feed=continuous`). Added a per-database
+  `ChangeFeed` broadcast channel (`ChangeFeedRegistry` in
+  `db/src/changes.rs`), wired into every write path (`put_doc`, both
+  `_bulk_docs` modes). Continuous mode streams newline-delimited JSON:
+  catch-up rows from storage first, then live rows via the broadcast
+  channel. Longpoll re-derives from storage after waking rather than
+  trusting the single event that woke it, so a burst of coalesced writes
+  isn't half-missed.
+  Verified with a new acceptance test (`test/integration/live_sync.js`):
+  two independent PouchDB instances both running
+  `db.sync({live:true, retry:true})` against the server converge in both
+  directions without polling or restarting — the actual real-world usage
+  shape from plan §2.2. Also manually verified that a doc, its `_local`
+  checkpoint, and `_changes` sequence numbers all survive a server
+  restart, confirming resumable sync actually works end-to-end.
