@@ -56,7 +56,11 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
       route except `GET /`; verified via curl — public root, 401 with no
       creds, 200 with correct creds, 401 with wrong creds — and both
       integration tests updated to authenticate and still passing)
-- [ ] CORS decision (see doc/open-questions.md)
+- [x] CORS decision: disabled by default, opt-in per-origin via
+      `COUCHDB_CLONE_CORS_ORIGINS` (no wildcard). Verified preflight
+      handling with curl: allowed origin gets `access-control-allow-origin`,
+      disallowed origin doesn't, and CORS correctly bypasses auth for the
+      preflight itself (a preflight never carries credentials).
 - [ ] Load/soak testing
 - [ ] Differential testing vs. real CouchDB as a standing pre-release gate
 

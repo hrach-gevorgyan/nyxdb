@@ -85,3 +85,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   correct credentials, 401 with wrong credentials. Updated both
   integration tests (`run.js`, `live_sync.js`) to authenticate; both
   still pass, as do all 14 unit tests.
+- Resolved the CORS open question (plan §7): disabled by default (no
+  layer at all, same-origin only), opt-in per-origin via
+  `COUCHDB_CLONE_CORS_ORIGINS` — no wildcard support, so a real origin
+  has to be named. Applied as the outermost layer, ahead of auth, since
+  a CORS preflight never carries credentials and would otherwise 401
+  before the CORS layer got a chance to answer it. Verified with curl:
+  allowed origin gets `access-control-allow-origin`, a disallowed one
+  doesn't, and preflight correctly bypasses auth either way.

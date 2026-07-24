@@ -6,8 +6,11 @@ each explicitly before the phase that needs it (see plan §7).
 ## Deployment / security
 - [ ] TLS or plaintext HTTP? Depends on deployment model (LAN-only vs.
       internet-reachable). Not yet decided.
-- [ ] CORS: which origins need access? `origins=*` is a real widening of
-      attack surface if this ever becomes internet-reachable.
+- [x] CORS — resolved: disabled by default (same-origin only, doesn't
+      affect non-browser clients). Set `COUCHDB_CLONE_CORS_ORIGINS` to a
+      comma-separated allowlist to enable it for a specific browser/WebView
+      origin; no wildcard support, so a real origin must be named
+      explicitly. See `db/src/main.rs::cors_layer`.
 - [ ] Rate limiting on `_bulk_docs` / abuse protection — needed or not?
 - [x] Credential storage/generation mechanism — resolved: random
       per-install (`admin` + generated password) written to

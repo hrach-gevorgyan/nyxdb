@@ -26,6 +26,7 @@ already in `.gitignore`) and treat it like any other secret.
   — HTTP Basic auth over plaintext HTTP sends credentials in the clear
   on every request; fine on a trusted LAN, not for anything
   internet-reachable.
-- CORS is not configured at all yet — see doc/open-questions.md.
+- CORS is disabled by default. Set `COUCHDB_CLONE_CORS_ORIGINS` (comma-
+  separated, no wildcard) if a browser/WebView client needs it.
 - Rate limiting / abuse protection on `_bulk_docs` — none yet.
 - Backup strategy for the sled data directory.
