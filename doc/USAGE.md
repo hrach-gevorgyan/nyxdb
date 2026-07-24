@@ -313,6 +313,11 @@ and did not compound across repeated runs in the same test session.
 Re-run with different scale via `LOAD_BULK_SIZE`/`LOAD_SUBSCRIBERS` env
 vars — see `test/README.md`.
 
+**For a direct comparison against real CouchDB** — install size, write/
+read throughput, and on-disk size for identical data (including one
+honest downside: this server currently uses *more* disk per document
+than CouchDB, not less) — see [BENCHMARKS.md](BENCHMARKS.md).
+
 ## 7. Where this differs from real CouchDB (summary)
 
 A consolidated version of the "not implemented"/"difference" notes

@@ -6,7 +6,8 @@ CouchDB replication protocol surface a real PouchDB client uses.
 **For how to run it, every endpoint with examples, config, benchmarks,
 and exactly where this differs from real CouchDB, see
 [doc/USAGE.md](doc/USAGE.md).** That's the reference doc — this README
-is just an index.
+is just an index. For a direct speed/size comparison against real
+CouchDB, see [doc/BENCHMARKS.md](doc/BENCHMARKS.md).
 
 See [rust-couchdb-clone-plan.md](rust-couchdb-clone-plan.md) for the full
 design rationale and [doc/roadmap.md](doc/roadmap.md) for current status
