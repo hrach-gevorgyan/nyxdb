@@ -29,3 +29,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
     Added minimal versions (single-revision last-write-wins for
     `_local`; simple presence check, no `possible_ancestors`, for
     `_revs_diff`).
+- Phase 1 start: added revision-tree unit tests for unequal-depth
+  conflicts, resolved conflicts (deleted branch preserved not pruned),
+  fully-deleted docs, deleted-then-recreated docs, deep multi-generation
+  branches, and `_revs_diff`-style missing-revs lookups. All pass against
+  the existing winner-picking implementation. Refactored `_revs_diff` to
+  use the new `RevTree::missing` helper instead of duplicating the logic.

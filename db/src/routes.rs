@@ -192,18 +192,12 @@ async fn revs_diff(
 
     let mut result = serde_json::Map::new();
     for (doc_id, revs) in requested {
-        let revs = revs.as_array().cloned().unwrap_or_default();
-        let tree = db.get_tree(doc_id).map_err(|_| internal_error())?;
-        let missing: Vec<Value> = revs
-            .into_iter()
-            .filter(|rev| {
-                let rev_str = rev.as_str().unwrap_or("");
-                match &tree {
-                    Some(t) => !t.nodes.contains_key(rev_str),
-                    None => true,
-                }
-            })
-            .collect();
+        let revs: Vec<String> = revs
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|r| r.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let tree = db.get_tree(doc_id).map_err(|_| internal_error())?.unwrap_or_default();
+        let missing: Vec<&String> = tree.missing(&revs);
         if !missing.is_empty() {
             result.insert(doc_id.clone(), json!({"missing": missing}));
         }

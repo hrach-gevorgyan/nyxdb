@@ -12,11 +12,19 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
       (`test/integration/run.js`, `db.replicate.to()`, 2 docs, passing)
 
 ## Phase 1 — Real revision trees
-- [ ] Multi-revision tracking (per-doc revision tree)
-- [ ] `_revs_diff`
+- [x] Revision-tree unit tests for the shapes in plan §6.1: linear
+      history, conflict (equal + unequal branch depth), resolved conflict
+      (deleted branch still preserved), deleted-then-recreated, deep
+      branches, `_revs_diff`-style missing-revs check. All passing.
+- [ ] `_bulk_docs` with `new_edits:false` (accept client's own revision
+      history verbatim instead of always minting a new rev) — needed for
+      real replication push, not just the Phase 0 single-writer path.
+- [x] `_revs_diff` (now backed by `RevTree::missing`, still no
+      `possible_ancestors`)
 - [ ] `_bulk_get`
-- [ ] Winner-picking algorithm (generation + hash tiebreak)
-- [ ] `_conflicts` on fetch
+- [x] Winner-picking algorithm (generation + hash tiebreak) — implemented
+      and unit-tested in `db/src/revtree.rs`
+- [ ] `_conflicts` wired into `GET /{db}/{id}?conflicts=true`
 
 ## Phase 2 — Live replication
 - [ ] `_changes` normal mode
@@ -37,5 +45,7 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
 - [ ] `_session` cookie auth
 
 ## Status
-Phase 0 complete: verified end-to-end with a real PouchDB client
-(`db.replicate.to()`). Starting Phase 1 next.
+Phase 0 complete. Phase 1 started: revision-tree logic (winner-picking,
+conflicts, deletion/recreation, missing-revs) is unit-tested and correct.
+Next: wire `new_edits:false` into `_bulk_docs` and `_conflicts` into
+`GET /{db}/{id}`.
