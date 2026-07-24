@@ -138,10 +138,14 @@ async fn put_local(
     Ok(Json(json!({"ok": true, "id": format!("_local/{id}"), "rev": "0-1"})))
 }
 
-/// `POST /{db}/_bulk_docs` — Phase 0 scope: batch writes using the same
-/// last-write-wins generation logic as `put_doc`. Does not yet honor
-/// `new_edits:false` (accepting the client's own revision tree verbatim),
-/// which real replication needs — that's Phase 1 (plan §4, §8).
+/// `POST /{db}/_bulk_docs` — dispatches to whichever write semantics the
+/// client asked for (plan §3, §8):
+/// - default (`new_edits` absent/true): single-writer last-write-wins,
+///   the server mints the new rev. Used by app-level writes.
+/// - `new_edits:false`: the pushing side of real replication sends its
+///   own exact revision tree (`_rev` + `_revisions`); the server must
+///   store that verbatim, including creating a real conflict if it
+///   diverges from what we already have (plan §2.3, §4).
 async fn bulk_docs(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
@@ -152,7 +156,16 @@ async fn bulk_docs(
         .get("docs")
         .and_then(Value::as_array)
         .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "bad_request"))?;
+    let new_edits = payload.get("new_edits").and_then(Value::as_bool).unwrap_or(true);
 
+    if new_edits {
+        bulk_docs_new_edits_true(&db, docs)
+    } else {
+        bulk_docs_new_edits_false(&db, docs)
+    }
+}
+
+fn bulk_docs_new_edits_true(db: &Db, docs: &[Value]) -> Result<Json<Value>, ApiError> {
     let mut results = Vec::with_capacity(docs.len());
     for doc in docs {
         let mut doc = doc.clone();
@@ -166,7 +179,7 @@ async fn bulk_docs(
             obj.remove("_rev");
         }
 
-        match write_doc(&db, &id, doc) {
+        match write_doc(db, &id, doc) {
             Ok(rev) => results.push(json!({"ok": true, "id": id, "rev": rev})),
             Err(_) => results.push(json!({
                 "id": id,
@@ -176,6 +189,72 @@ async fn bulk_docs(
         }
     }
     Ok(Json(Value::Array(results)))
+}
+
+/// Real CouchDB returns `[]` on a fully successful `new_edits:false`
+/// push (the rev is dictated by the client, so there's nothing new to
+/// report) — only failures show up in the response array.
+fn bulk_docs_new_edits_false(db: &Db, docs: &[Value]) -> Result<Json<Value>, ApiError> {
+    let mut errors = Vec::new();
+    for doc in docs {
+        let Some(id) = doc.get("_id").and_then(Value::as_str) else {
+            errors.push(json!({"error": "bad_request", "reason": "missing _id"}));
+            continue;
+        };
+        let Some(chain) = revision_chain(doc) else {
+            errors.push(json!({"id": id, "error": "bad_request", "reason": "missing _rev"}));
+            continue;
+        };
+        let deleted = doc.get("_deleted").and_then(Value::as_bool).unwrap_or(false);
+        let mut body = doc.clone();
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("_id");
+            obj.remove("_rev");
+            obj.remove("_revisions");
+            obj.remove("_deleted");
+        }
+
+        let write = || -> sled::Result<()> {
+            let mut tree = db.get_tree(id)?.unwrap_or_default();
+            tree.insert_revision_chain(&chain, deleted, body);
+            db.put_tree(id, &tree)?;
+            Ok(())
+        };
+        if write().is_err() {
+            errors.push(json!({
+                "id": id,
+                "error": "internal_error",
+                "reason": "failed to write document",
+            }));
+        }
+    }
+    Ok(Json(Value::Array(errors)))
+}
+
+/// Resolves a doc's revision id + ancestry (as `new_edits:false` sends
+/// it) into the newest-first chain `RevTree::insert_revision_chain`
+/// expects. Falls back to a single-node chain (no known ancestry) if
+/// `_revisions` wasn't sent alongside `_rev`.
+fn revision_chain(doc: &Value) -> Option<Vec<crate::revtree::RevId>> {
+    let rev = doc.get("_rev").and_then(Value::as_str)?;
+    let revisions = doc.get("_revisions").and_then(Value::as_object);
+    match revisions {
+        Some(revisions) => {
+            let start = revisions.get("start")?.as_u64()?;
+            let ids = revisions.get("ids")?.as_array()?;
+            Some(
+                ids.iter()
+                    .enumerate()
+                    .filter_map(|(i, hash)| {
+                        let hash = hash.as_str()?;
+                        let gen = start.checked_sub(i as u64)?;
+                        Some(format!("{gen}-{hash}"))
+                    })
+                    .collect(),
+            )
+        }
+        None => Some(vec![rev.to_string()]),
+    }
 }
 
 /// `POST /{db}/_revs_diff` — given `{docId: [revs...]}`, report which of

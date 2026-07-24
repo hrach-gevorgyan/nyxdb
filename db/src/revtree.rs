@@ -63,6 +63,29 @@ impl RevTree {
     pub fn missing<'a>(&self, requested: &'a [RevId]) -> Vec<&'a RevId> {
         requested.iter().filter(|rev| !self.nodes.contains_key(*rev)).collect()
     }
+
+    /// `_bulk_docs` with `new_edits:false` (real replication push, plan
+    /// §3): the client dictates the exact revision id and its ancestry
+    /// via `_revisions` (`{"start": N, "ids": [hash_N, hash_N-1, ...]}`,
+    /// newest first) instead of us minting a new one. `chain` here is
+    /// that same newest-first list of full rev ids, already resolved by
+    /// the caller from `start`/`ids`.
+    ///
+    /// Existing nodes are never overwritten — replaying the same push
+    /// twice, or receiving a chain whose tail already connects to
+    /// history we have, must be idempotent and must not clobber a
+    /// tombstone's `deleted` flag or an existing node's body.
+    pub fn insert_revision_chain(&mut self, chain: &[RevId], leaf_deleted: bool, leaf_body: serde_json::Value) {
+        for (i, rev) in chain.iter().enumerate() {
+            if self.nodes.contains_key(rev) {
+                continue;
+            }
+            let parent = chain.get(i + 1).cloned();
+            let deleted = i == 0 && leaf_deleted;
+            let body = if i == 0 { leaf_body.clone() } else { serde_json::json!({}) };
+            self.nodes.insert(rev.clone(), RevNode { parent, deleted, body });
+        }
+    }
 }
 
 fn split_rev(rev: &str) -> (u64, &str) {
@@ -202,5 +225,86 @@ mod tests {
         let tree = RevTree::default();
         let requested = vec!["1-aaa".to_string(), "1-bbb".to_string()];
         assert_eq!(tree.missing(&requested), vec![&"1-aaa".to_string(), &"1-bbb".to_string()]);
+    }
+
+    #[test]
+    fn insert_revision_chain_builds_full_ancestry_from_scratch() {
+        let mut tree = RevTree::default();
+        // Newest-first, as _revisions sends it.
+        let chain = vec!["3-ccc".to_string(), "2-bbb".to_string(), "1-aaa".to_string()];
+        tree.insert_revision_chain(&chain, false, serde_json::json!({"foo": "bar"}));
+
+        assert_eq!(tree.nodes.len(), 3);
+        assert_eq!(tree.nodes["3-ccc"].parent, Some("2-bbb".to_string()));
+        assert_eq!(tree.nodes["2-bbb"].parent, Some("1-aaa".to_string()));
+        assert_eq!(tree.nodes["1-aaa"].parent, None);
+        assert_eq!(tree.winner(), Some(&"3-ccc".to_string()));
+        assert_eq!(tree.nodes["3-ccc"].body, serde_json::json!({"foo": "bar"}));
+    }
+
+    #[test]
+    fn insert_revision_chain_connects_to_existing_history_without_duplicating() {
+        let mut tree = RevTree::default();
+        tree.nodes.insert("1-aaa".into(), node(None));
+        // Push a chain whose tail (1-aaa) we already have.
+        let chain = vec!["2-bbb".to_string(), "1-aaa".to_string()];
+        tree.insert_revision_chain(&chain, false, serde_json::json!({"foo": "bar"}));
+
+        assert_eq!(tree.nodes.len(), 2);
+        assert_eq!(tree.nodes["2-bbb"].parent, Some("1-aaa".to_string()));
+        assert_eq!(tree.winner(), Some(&"2-bbb".to_string()));
+    }
+
+    #[test]
+    fn insert_revision_chain_is_idempotent_and_never_clobbers_existing_nodes() {
+        let mut tree = RevTree::default();
+        let chain = vec!["2-bbb".to_string(), "1-aaa".to_string()];
+        tree.insert_revision_chain(&chain, false, serde_json::json!({"foo": "bar"}));
+        // Replay the exact same push (e.g. a retried replication batch).
+        tree.insert_revision_chain(&chain, false, serde_json::json!({"foo": "bar"}));
+        assert_eq!(tree.nodes.len(), 2);
+
+        // A later push claiming 1-aaa is a fresh, non-deleted root must not
+        // resurrect or alter a tombstone we already stored for it.
+        let mut tombstoned = RevTree::default();
+        let mut tombstone = node(None);
+        tombstone.deleted = true;
+        tombstoned.nodes.insert("1-aaa".into(), tombstone);
+        tombstoned.insert_revision_chain(&["1-aaa".to_string()], false, serde_json::json!({"resurrected": true}));
+        assert!(tombstoned.nodes["1-aaa"].deleted);
+    }
+
+    /// A diverging chain pushed via `new_edits:false` (two devices editing
+    /// the same rev independently) must create a real conflict, not
+    /// silently overwrite — this is the actual case replication exists to
+    /// handle correctly (plan §1.2, §2.3).
+    #[test]
+    fn insert_revision_chain_diverging_from_shared_ancestor_creates_conflict() {
+        let mut tree = RevTree::default();
+        tree.nodes.insert("1-aaa".into(), node(None));
+        tree.insert_revision_chain(
+            &["2-bbb".to_string(), "1-aaa".to_string()],
+            false,
+            serde_json::json!({"device": "A"}),
+        );
+        tree.insert_revision_chain(
+            &["2-ccc".to_string(), "1-aaa".to_string()],
+            false,
+            serde_json::json!({"device": "B"}),
+        );
+
+        assert_eq!(tree.nodes.len(), 3);
+        let mut leaves: Vec<&String> = tree.leaves();
+        leaves.sort();
+        assert_eq!(leaves, vec![&"2-bbb".to_string(), &"2-ccc".to_string()]);
+        assert_eq!(tree.conflicts().len(), 1);
+    }
+
+    #[test]
+    fn insert_revision_chain_marks_leaf_deleted() {
+        let mut tree = RevTree::default();
+        tree.nodes.insert("1-aaa".into(), node(None));
+        tree.insert_revision_chain(&["2-bbb".to_string(), "1-aaa".to_string()], true, serde_json::json!({}));
+        assert!(tree.nodes["2-bbb"].deleted);
     }
 }

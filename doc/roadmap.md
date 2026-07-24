@@ -16,9 +16,10 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
       history, conflict (equal + unequal branch depth), resolved conflict
       (deleted branch still preserved), deleted-then-recreated, deep
       branches, `_revs_diff`-style missing-revs check. All passing.
-- [ ] `_bulk_docs` with `new_edits:false` (accept client's own revision
-      history verbatim instead of always minting a new rev) — needed for
-      real replication push, not just the Phase 0 single-writer path.
+- [x] `_bulk_docs` with `new_edits:false` (accept client's own revision
+      history verbatim via `_rev`/`_revisions`, idempotent, creates real
+      conflicts on divergence). Verified via unit tests and manual HTTP
+      test (push + conflicting push + winner/conflict check).
 - [x] `_revs_diff` (now backed by `RevTree::missing`, still no
       `possible_ancestors`)
 - [ ] `_bulk_get`
@@ -45,7 +46,7 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
 - [ ] `_session` cookie auth
 
 ## Status
-Phase 0 complete. Phase 1 started: revision-tree logic (winner-picking,
-conflicts, deletion/recreation, missing-revs) is unit-tested and correct.
-Next: wire `new_edits:false` into `_bulk_docs` and `_conflicts` into
-`GET /{db}/{id}`.
+Phase 0 complete. Phase 1: revision-tree logic (winner-picking, conflicts,
+deletion/recreation, missing-revs) and `new_edits:false` push are done
+and tested. Next: wire `_conflicts` into `GET /{db}/{id}?conflicts=true`,
+then `_bulk_get`.

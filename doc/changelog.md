@@ -35,3 +35,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   branches, and `_revs_diff`-style missing-revs lookups. All pass against
   the existing winner-picking implementation. Refactored `_revs_diff` to
   use the new `RevTree::missing` helper instead of duplicating the logic.
+- Added `RevTree::insert_revision_chain` plus 6 unit tests (idempotency,
+  connecting to existing history, never clobbering an existing tombstone,
+  and — the actually load-bearing case — a diverging chain correctly
+  creating a real conflict instead of overwriting).
+- Wired `new_edits:false` into `POST /{db}/_bulk_docs`: the pushing side
+  of real replication now has its exact `_rev`/`_revisions` history
+  stored verbatim instead of the server always minting a fresh
+  last-write-wins rev. Verified manually over HTTP: a full 3-generation
+  push, followed by a diverging push at the same parent, correctly
+  produces a real conflict resolved by the existing hash tiebreak.
