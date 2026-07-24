@@ -1,7 +1,14 @@
 # Maintenance
 
+Also update [doc/USAGE.md](USAGE.md) — the endpoint reference, config
+table, benchmark numbers, and CouchDB-difference list — whenever a route,
+env var, or behavior changes. It's meant to be the single up-to-date
+reference for both users and AI agents; letting it drift defeats the
+purpose.
+
 ## Repo layout
-- `doc/` — planning and process docs (this folder).
+- `doc/` — planning and process docs (this folder). Start with
+  [USAGE.md](USAGE.md) for how to actually use the server.
 - `db/` — main codebase: the Rust server implementing the CouchDB
   replication protocol subset (see `rust-couchdb-clone-plan.md` §3).
 - `test/` — testing environment: unit/integration tests, differential
