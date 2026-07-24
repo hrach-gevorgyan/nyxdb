@@ -22,7 +22,8 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
       test (push + conflicting push + winner/conflict check).
 - [x] `_revs_diff` (now backed by `RevTree::missing`, still no
       `possible_ancestors`)
-- [ ] `_bulk_get`
+- [x] `_bulk_get` (per-item ok/error entries; missing doc, missing rev,
+      and deleted-rev cases all verified over HTTP)
 - [x] Winner-picking algorithm (generation + hash tiebreak) — implemented
       and unit-tested in `db/src/revtree.rs`
 - [x] `_conflicts` wired into `GET /{db}/{id}?conflicts=true`. Also fixed
@@ -49,6 +50,6 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
 - [ ] `_session` cookie auth
 
 ## Status
-Phase 0 complete. Phase 1: revision trees, `new_edits:false` push, and
-`_conflicts`/deleted-doc handling on `GET` are done and tested. Next:
-`_bulk_get`, then Phase 2 (`_changes` feed).
+Phase 0 and Phase 1 complete. Starting Phase 2 next: `_changes` feed
+(normal, longpoll, continuous) and `_local` checkpoint round-tripping
+for real `live:true` resumable sync.

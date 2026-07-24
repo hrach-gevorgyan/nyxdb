@@ -52,3 +52,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   returns 404 `{"error":"not_found","reason":"deleted"}` for it. Verified
   manually over HTTP (conflict listing, and delete-then-404 sequence) and
   confirmed no regression in unit tests or the PouchDB integration test.
+- Added `POST /{db}/_bulk_get` (plan §3): batched doc fetch, one ok/error
+  entry per requested `{id, rev?}` pair rather than failing the whole
+  batch on a miss. Verified over HTTP: existing doc without `rev`, a
+  nonexistent id, and a bogus `rev` on a real id all report correctly.
+  This closes out Phase 1 — full unit suite (14 tests) and the PouchDB
+  integration test both still pass.

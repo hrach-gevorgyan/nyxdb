@@ -53,6 +53,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/:db/:id", get(get_doc).put(put_doc))
         .route("/:db/_bulk_docs", post(bulk_docs))
         .route("/:db/_revs_diff", post(revs_diff))
+        .route("/:db/_bulk_get", post(bulk_get))
         .route("/:db/_local/:id", get(get_local).put(put_local))
         .with_state(state)
 }
@@ -300,6 +301,61 @@ async fn revs_diff(
         }
     }
     Ok(Json(Value::Object(result)))
+}
+
+/// `POST /{db}/_bulk_get` — given `[{"id":..,"rev":..(optional)}, ...]`,
+/// fetch each doc body in one round-trip instead of N individual `GET`s
+/// (plan §3). If `rev` is omitted, returns the current winner; deleted
+/// docs/missing revs report as `error` entries rather than failing the
+/// whole batch, matching CouchDB's per-item error shape.
+async fn bulk_get(
+    State(state): State<AppState>,
+    Path(db_name): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let requests = payload
+        .get("docs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
+
+    let mut results = Vec::with_capacity(requests.len());
+    for req in requests {
+        let Some(id) = req.get("id").and_then(Value::as_str) else {
+            results.push(json!({"id": Value::Null, "docs": [{"error": {"error": "bad_request", "reason": "missing id"}}]}));
+            continue;
+        };
+        let requested_rev = req.get("rev").and_then(Value::as_str);
+
+        let doc_result = (|| -> sled::Result<Value> {
+            let Some(tree) = db.get_tree(id)? else {
+                return Ok(json!({"error": {"id": id, "error": "not_found", "reason": "missing"}}));
+            };
+            let rev_id = match requested_rev {
+                Some(rev) => rev.to_string(),
+                None => match tree.winner() {
+                    Some(rev) => rev.clone(),
+                    None => return Ok(json!({"error": {"id": id, "error": "not_found", "reason": "missing"}})),
+                },
+            };
+            match tree.nodes.get(&rev_id) {
+                Some(node) if node.deleted => {
+                    Ok(json!({"error": {"id": id, "rev": rev_id, "error": "not_found", "reason": "deleted"}}))
+                }
+                Some(node) => {
+                    let mut body = node.body.clone();
+                    body["_id"] = json!(id);
+                    body["_rev"] = json!(rev_id);
+                    Ok(json!({"ok": body}))
+                }
+                None => Ok(json!({"error": {"id": id, "rev": rev_id, "error": "not_found", "reason": "missing"}})),
+            }
+        })()
+        .map_err(|_| internal_error())?;
+
+        results.push(json!({"id": id, "docs": [doc_result]}));
+    }
+    Ok(Json(json!({"results": results})))
 }
 
 fn write_doc(db: &Db, id: &str, body: Value) -> sled::Result<String> {
