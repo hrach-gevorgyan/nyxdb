@@ -61,7 +61,14 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
       handling with curl: allowed origin gets `access-control-allow-origin`,
       disallowed origin doesn't, and CORS correctly bypasses auth for the
       preflight itself (a preflight never carries credentials).
-- [ ] Load/soak testing
+- [x] Load/soak testing (`test/load/run.js`, plan §6.5: large `_bulk_docs`
+      batch + many concurrent `feed=continuous` subscribers). This
+      caught a real bug: subscribers silently dropped changes once they
+      fell behind the broadcast channel's capacity (`RecvError::Lagged`
+      was treated the same as `Ok`, discarding data). Fixed by having
+      the continuous stream re-catch-up from storage on lag instead of
+      silently continuing. Verified up to 80 concurrent subscribers /
+      15,000 docs with zero missed changes.
 - [ ] Differential testing vs. real CouchDB as a standing pre-release gate
 
 ## Phase 4 — Only if actually needed
@@ -70,10 +77,9 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
 - [ ] `_session` cookie auth
 
 ## Status
-Phase 0, 1, and 2 complete, plus auth from Phase 3. The server is now
-usable for real `db.sync({live:true})` testing against an actual app
-without leaving it wide open on the network — still plaintext HTTP, so
-keep it on a trusted LAN until TLS is decided (doc/open-questions.md).
-Remaining Phase 3 items (CORS, load testing, differential testing vs
-real CouchDB) are about hardening for wider exposure, not blockers for
-personal testing.
+Phase 0, 1, and 2 complete. Phase 3: auth, CORS, and load/soak testing
+done — the last of which caught and fixed a real correctness bug
+(silently dropped changes under load, see changelog). Still plaintext
+HTTP, so keep it on a trusted LAN until TLS is decided
+(doc/open-questions.md). Remaining: differential testing vs. real
+CouchDB.

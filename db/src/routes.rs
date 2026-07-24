@@ -13,7 +13,6 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
-use futures::StreamExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -485,37 +484,68 @@ async fn changes_longpoll(
     changes_normal(&db, since, style_all_docs)
 }
 
+/// Streaming state for `feed=continuous`. `queue` holds rows not yet
+/// sent (catch-up rows initially, then re-catch-up rows after a lag
+/// recovery); `last_seq` is the highest seq actually sent so far.
+struct ContinuousState {
+    db: Db,
+    rx: tokio::sync::broadcast::Receiver<ChangeEvent>,
+    queue: std::collections::VecDeque<(u64, String)>,
+    last_seq: u64,
+    style_all_docs: bool,
+}
+
 fn changes_continuous(state: AppState, db_name: String, db: Db, since: u64, style_all_docs: bool) -> Result<Response, ApiError> {
     let feed = state.feeds.get_or_create(&db_name);
-    let start_seq = db.current_seq().map_err(|_| internal_error())?;
     let rx = feed.subscribe();
 
     let entries = db.changes_since(since).map_err(|_| internal_error())?;
-    let historical: Vec<(u64, String)> =
-        dedupe_latest(entries).into_iter().filter(|(seq, _)| *seq <= start_seq).collect();
+    let historical = dedupe_latest(entries);
+    let last_seq = historical.last().map(|(seq, _)| *seq).unwrap_or(since);
 
-    let db_hist = db.clone();
-    let historical_lines: Vec<Result<Bytes, std::io::Error>> = historical
-        .iter()
-        .filter_map(|(seq, id)| build_change_row(&db_hist, *seq, id, style_all_docs))
-        .map(|row| Ok(Bytes::from(format!("{row}\n"))))
-        .collect();
-    let historical_stream = futures::stream::iter(historical_lines);
+    let initial =
+        ContinuousState { db, rx, queue: historical.into_iter().collect(), last_seq, style_all_docs };
 
-    let db_live = db.clone();
-    let live_stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |event| {
-        let db_live = db_live.clone();
-        async move {
-            let event = event.ok()?;
-            if event.seq <= start_seq {
-                return None;
+    // A plain broadcast subscription silently drops messages once a slow
+    // receiver falls behind the channel's fixed capacity (`RecvError::
+    // Lagged`) — under load (many docs written faster than a subscriber
+    // reads), that means permanently missing changes rather than an
+    // occasional catch-up. Recovering by re-querying storage from
+    // `last_seq` (instead of just resubscribing) is what makes this
+    // correct rather than merely fast in the common case.
+    let stream = futures::stream::unfold(initial, |mut st| async move {
+        loop {
+            if let Some((seq, id)) = st.queue.pop_front() {
+                if let Some(row) = build_change_row(&st.db, seq, &id, st.style_all_docs) {
+                    st.last_seq = st.last_seq.max(seq);
+                    return Some((Ok::<_, std::io::Error>(Bytes::from(format!("{row}\n"))), st));
+                }
+                continue;
             }
-            let row = build_change_row(&db_live, event.seq, &event.doc_id, style_all_docs)?;
-            Some(Ok::<_, std::io::Error>(Bytes::from(format!("{row}\n"))))
+
+            match st.rx.recv().await {
+                Ok(event) => {
+                    if event.seq <= st.last_seq {
+                        continue;
+                    }
+                    if let Some(row) = build_change_row(&st.db, event.seq, &event.doc_id, st.style_all_docs) {
+                        st.last_seq = event.seq;
+                        return Some((Ok(Bytes::from(format!("{row}\n"))), st));
+                    }
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => match st.db.changes_since(st.last_seq) {
+                    Ok(missed) => {
+                        st.queue = dedupe_latest(missed).into_iter().collect();
+                        continue;
+                    }
+                    Err(_) => return None,
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
         }
     });
 
-    let stream = historical_stream.chain(live_stream);
     Response::builder()
         .header("Content-Type", "application/json")
         .body(Body::from_stream(stream))

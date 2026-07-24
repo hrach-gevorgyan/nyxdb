@@ -12,7 +12,6 @@ sled = "0.34"
 sha2 = "0.10"
 tower-http = { version = "0.5", features = ["cors", "trace", "normalize-path"] }
 tower = "0.5"
-tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 base64 = "0.22"
 tracing = "0.1"

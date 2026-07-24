@@ -93,3 +93,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   before the CORS layer got a chance to answer it. Verified with curl:
   allowed origin gets `access-control-allow-origin`, a disallowed one
   doesn't, and preflight correctly bypasses auth either way.
+- Added a load/soak test (`test/load/run.js`, plan §6.5): a large
+  `_bulk_docs` batch plus many concurrent `feed=continuous` subscribers,
+  verifying every subscriber actually receives every change.
+  **This caught a real bug**: the continuous handler's `filter_map`
+  treated `RecvError::Lagged` (a subscriber falling behind the broadcast
+  channel's fixed capacity) the same as a clean `Ok` via `.ok()?` —
+  silently discarding whatever was missed instead of catching up. Passed
+  fine at 20 subscribers / 2000 docs, failed at 50 subscribers / 8000
+  docs (one subscriber stalled at 3665/8000, never recovering).
+  Fixed by rewriting `changes_continuous` as a stateful
+  `futures::stream::unfold` (`ContinuousState`) that, on `Lagged`,
+  re-queries `db.changes_since(last_seq)` and resumes from there instead
+  of just resubscribing and hoping. Verified at 50 subscribers/8000 docs
+  and 80 subscribers/15,000 docs with zero missed changes at either
+  scale. Dropped the now-unused `tokio-stream` dependency.
