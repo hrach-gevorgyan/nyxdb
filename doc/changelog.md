@@ -74,3 +74,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   shape from plan §2.2. Also manually verified that a doc, its `_local`
   checkpoint, and `_changes` sequence numbers all survive a server
   restart, confirming resumable sync actually works end-to-end.
+- Added HTTP Basic auth (plan §5, §7), required on every route except
+  `GET /` (server identification stays public, matching real CouchDB's
+  behavior — clients probe it for feature detection before necessarily
+  having db-specific credentials). Credentials are random per-install
+  (`admin` + generated password, written to `<data dir>/credentials.json`
+  on first run) or pinned via `COUCHDB_CLONE_USER`/
+  `COUCHDB_CLONE_PASSWORD`, which always take priority. New `db/src/auth.rs`.
+  Verified over HTTP: public root, 401 with no credentials, 200 with
+  correct credentials, 401 with wrong credentials. Updated both
+  integration tests (`run.js`, `live_sync.js`) to authenticate; both
+  still pass, as do all 14 unit tests.

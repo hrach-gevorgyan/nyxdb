@@ -51,7 +51,11 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
       re-sync
 
 ## Phase 3 — Hardening
-- [ ] Auth (HTTP Basic, random per-install credentials)
+- [x] Auth (HTTP Basic, random per-install credentials or
+      `COUCHDB_CLONE_USER`/`COUCHDB_CLONE_PASSWORD`; required on every
+      route except `GET /`; verified via curl — public root, 401 with no
+      creds, 200 with correct creds, 401 with wrong creds — and both
+      integration tests updated to authenticate and still passing)
 - [ ] CORS decision (see doc/open-questions.md)
 - [ ] Load/soak testing
 - [ ] Differential testing vs. real CouchDB as a standing pre-release gate
@@ -62,8 +66,10 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
 - [ ] `_session` cookie auth
 
 ## Status
-Phase 0, 1, and 2 complete. This is the point where the server can
-genuinely be pointed at a real app for `db.sync({live:true})` testing
-(see doc/open-questions.md — auth is not wired in yet, so keep this on a
-trusted network only until Phase 3). Next: minimal HTTP Basic auth, then
-the rest of Phase 3 hardening.
+Phase 0, 1, and 2 complete, plus auth from Phase 3. The server is now
+usable for real `db.sync({live:true})` testing against an actual app
+without leaving it wide open on the network — still plaintext HTTP, so
+keep it on a trusted LAN until TLS is decided (doc/open-questions.md).
+Remaining Phase 3 items (CORS, load testing, differential testing vs
+real CouchDB) are about hardening for wider exposure, not blockers for
+personal testing.

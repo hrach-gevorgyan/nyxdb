@@ -3,12 +3,17 @@
 // PouchDB instances both synced live to the server should converge
 // without either side polling or restarting.
 //
-// Expects the server running at SERVER_URL (default http://127.0.0.1:8085).
+// Expects the server running at SERVER_URL (default http://127.0.0.1:8085)
+// with COUCHDB_CLONE_USER/COUCHDB_CLONE_PASSWORD matching TEST_USER/TEST_PASSWORD.
 
 const PouchDB = require("pouchdb");
 
 const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
+const TEST_USER = process.env.TEST_USER || "testuser";
+const TEST_PASSWORD = process.env.TEST_PASSWORD || "testpass";
 const DB_NAME = "livetest_" + Date.now();
+const AUTH_HEADER = "Basic " + Buffer.from(`${TEST_USER}:${TEST_PASSWORD}`).toString("base64");
+const AUTH_OPT = { auth: { username: TEST_USER, password: TEST_PASSWORD } };
 
 function fail(msg) {
   console.error("FAIL:", msg);
@@ -26,14 +31,14 @@ async function waitFor(fn, timeoutMs = 8000) {
 
 async function main() {
   const remoteUrl = `${SERVER_URL}/${DB_NAME}`;
-  const createResp = await fetch(remoteUrl, { method: "PUT" });
+  const createResp = await fetch(remoteUrl, { method: "PUT", headers: { Authorization: AUTH_HEADER } });
   if (!createResp.ok) fail(`could not create remote db: ${createResp.status}`);
 
   const deviceA = new PouchDB(DB_NAME + "_a");
   const deviceB = new PouchDB(DB_NAME + "_b");
 
-  const syncA = deviceA.sync(remoteUrl, { live: true, retry: true });
-  const syncB = deviceB.sync(remoteUrl, { live: true, retry: true });
+  const syncA = deviceA.sync(remoteUrl, { live: true, retry: true, ...AUTH_OPT });
+  const syncB = deviceB.sync(remoteUrl, { live: true, retry: true, ...AUTH_OPT });
 
   // Give both live syncs a moment to establish their continuous _changes
   // subscriptions before we write.

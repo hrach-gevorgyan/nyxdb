@@ -9,8 +9,11 @@ each explicitly before the phase that needs it (see plan §7).
 - [ ] CORS: which origins need access? `origins=*` is a real widening of
       attack surface if this ever becomes internet-reachable.
 - [ ] Rate limiting on `_bulk_docs` / abuse protection — needed or not?
-- [ ] Credential storage/generation mechanism (random per-install, config
-      file location, permissions).
+- [x] Credential storage/generation mechanism — resolved: random
+      per-install (`admin` + generated password) written to
+      `<data dir>/credentials.json`, or pinned via
+      `COUCHDB_CLONE_USER`/`COUCHDB_CLONE_PASSWORD`. HTTP Basic auth
+      required on every route except `GET /`. See `db/src/auth.rs`.
 
 ## Architecture
 - [ ] `axum` vs `actix-web` — leaning `axum`, not finalized.

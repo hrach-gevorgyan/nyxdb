@@ -23,6 +23,7 @@ use std::time::Duration;
 pub struct AppState {
     pub root: Arc<sled::Db>,
     pub feeds: ChangeFeedRegistry,
+    pub creds: Arc<crate::auth::Credentials>,
 }
 
 /// CouchDB clients (PouchDB included) expect a JSON body on error
@@ -62,6 +63,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/:db/_bulk_get", post(bulk_get))
         .route("/:db/_local/:id", get(get_local).put(put_local))
         .route("/:db/_changes", get(changes))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth::require_auth))
         .with_state(state)
 }
 

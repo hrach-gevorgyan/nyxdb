@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod revtree;
 pub mod storage;
 pub mod routes;
