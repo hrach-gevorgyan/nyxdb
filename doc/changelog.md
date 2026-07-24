@@ -130,3 +130,28 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   re-serializes a doc's entire revision tree rather than appending just
   the new revision — a real, reported trade-off, not spin, and a
   candidate for future optimization.
+- Fixed the on-disk-size gap just found above (Phase 4): two changes,
+  both in `db/src/storage.rs`/`db/src/main.rs`. (1) Enabled sled's zstd
+  compression (`use_compression(true)`, `compression` Cargo feature) —
+  off by default, and JSON compresses well; the bigger of the two wins.
+  (2) Every write was doing an extra sled write for a hand-rolled
+  sequence counter (`meta.update_and_fetch`) purely to generate a
+  `_changes` sequence number; replaced with sled's own lock-free
+  `Db::generate_id()`, and `current_seq()` now reads the sequence log's
+  own highest key instead of maintaining separate, redundant state.
+  Result: 6.1MB → 2.6MB for the same 5,000 docs (CouchDB: 1.74MB) — gap
+  closed from ~3.5x to ~1.5x. Trade-off: write throughput dropped from
+  ~56,800 to ~29,940 docs/sec (compression costs CPU) — still ~8x faster
+  than CouchDB, so clearly worth it. Binary grew 2.76MB → 4.42MB (zstd
+  statically linked in) — still ~52x smaller than CouchDB's 229MB
+  install. Verified no regression: full unit suite (14 tests), both
+  PouchDB integration tests, the load test, and the differential test
+  vs. real CouchDB all still pass.
+- Found and fixed a related gap while re-running the differential test:
+  `DELETE /{db}` wasn't implemented at all (a bare 405, which broke the
+  differential test's own cleanup step against both servers). Added it —
+  matches real CouchDB, though it's not part of the replication protocol
+  itself (a syncing PouchDB client never calls it); mainly useful for
+  test/dev hygiene. Also gave `test/differential/run.js` a cleanup step
+  it was missing since it was first written (it never deleted its own
+  disposable databases on either server).

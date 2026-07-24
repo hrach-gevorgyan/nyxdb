@@ -37,7 +37,18 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let data_dir = std::env::var("COUCHDB_CLONE_DATA").unwrap_or_else(|_| "./data".into());
-    let root = Arc::new(sled::open(&data_dir).expect("failed to open sled database"));
+    // zstd compression is off by default in sled; JSON document bodies
+    // compress well, and enabling it was one of two changes (the other
+    // being storage.rs's use of generate_id() instead of a hand-rolled
+    // counter write) that closed most of the on-disk-size gap found in
+    // doc/BENCHMARKS.md.
+    let root = Arc::new(
+        sled::Config::new()
+            .path(&data_dir)
+            .use_compression(true)
+            .open()
+            .expect("failed to open sled database"),
+    );
 
     let creds = Credentials::load_or_generate(Path::new(&data_dir)).expect("failed to load/generate credentials");
     tracing::info!(

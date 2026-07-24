@@ -68,6 +68,10 @@ class Server {
     }
   }
 
+  async deleteDb() {
+    await this.req("DELETE", `/${DB_NAME}`);
+  }
+
   async pushRevision(id, rev, parentIds, deleted, body) {
     const [gen, hash] = rev.split(/-(.+)/);
     const ids = [hash, ...parentIds.map((r) => r.split(/-(.+)/)[1])];
@@ -180,6 +184,8 @@ async function main() {
     console.error(`MISMATCH: _revs_diff missing list differs`);
     failures++;
   }
+
+  await Promise.all([ours.deleteDb(), couch.deleteDb()]);
 
   if (failures > 0) {
     fail(`${failures} mismatch(es) found between our server and real CouchDB — see above`);

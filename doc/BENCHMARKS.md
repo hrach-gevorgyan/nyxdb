@@ -16,9 +16,9 @@ Every number below is from an actual run in this repo, not a projection.
 
 | | This server | Real CouchDB 3.5.2 |
 |---|---|---|
-| **What you ship/install** | One ~2.76 MB executable (`couchdb-clone.exe`) | Full install: Erlang/OTP runtime + ICU + a bundled Lucene-based search engine (`nouveau`) + CouchDB itself |
-| **Total size** | 2.76 MB | 229 MB |
-| **Ratio** | — | **~83x larger** |
+| **What you ship/install** | One ~4.42 MB executable (`couchdb-clone.exe`, zstd statically linked in) | Full install: Erlang/OTP runtime + ICU + a bundled Lucene-based search engine (`nouveau`) + CouchDB itself |
+| **Total size** | 4.42 MB | 229 MB |
+| **Ratio** | — | **~52x larger** |
 
 CouchDB's install breakdown (`test/benchmark` methodology, measured via
 `du`/`Get-ChildItem`):
@@ -55,15 +55,18 @@ request to each server:
 
 | | Time | Throughput |
 |---|---|---|
-| This server | 88ms | ~56,800 docs/sec |
-| Real CouchDB | 1,477ms | ~3,385 docs/sec |
-| **Ratio** | | **~16.8x faster** |
+| This server | 167ms | ~29,940 docs/sec |
+| Real CouchDB | 1,330ms | ~3,759 docs/sec |
+| **Ratio** | | **~7.96x faster** |
 
-This gap is expected, not a fluke — CouchDB's write path does more per
-document by design (its own MVCC B-tree updates, view group bookkeeping
-hooks, replication-relevant metadata) that this server's much smaller
-scope skips entirely. It is not evidence that sled is inherently 16x
-faster than CouchDB's storage engine in general.
+Slower than an earlier measurement of this server (88ms/~56,800 docs/sec)
+— the difference is the zstd compression enabled below, which trades
+some write-side CPU for a large disk-size win. Still comfortably faster
+than CouchDB. This gap is expected, not a fluke either way — CouchDB's
+write path does more per document by design (its own MVCC B-tree
+updates, view group bookkeeping hooks, replication-relevant metadata)
+that this server's much smaller scope skips entirely. It is not evidence
+that sled is inherently faster than CouchDB's storage engine in general.
 
 ## Read throughput
 
@@ -73,39 +76,65 @@ localhost either way):
 
 | | Time | Avg latency |
 |---|---|---|
-| This server | 2,011ms | 10.05ms/req |
-| Real CouchDB | 2,346ms | 11.73ms/req |
-| **Ratio** | | **~1.17x faster** |
+| This server | 1,111ms | 5.55ms/req |
+| Real CouchDB | 1,238ms | 6.19ms/req |
+| **Ratio** | | **~1.11x faster** |
 
 Much closer than the write benchmark — reads are dominated by
 per-request HTTP overhead on both servers, not by storage-engine
 differences, so this is a much weaker signal than the write number
 above.
 
-## On-disk size (the honest surprise)
+## On-disk size — found a real gap, then closed most of it
 
 Same 5,000 documents, disk space actually used:
 
 | | Size | Per doc |
 |---|---|---|
-| This server (sled) | 6.1 MB | ~1,281 bytes/doc |
+| **Before fix**: this server (sled, no compression, hand-rolled seq counter) | 6.1 MB | ~1,281 bytes/doc |
+| **After fix**: this server (sled, zstd compression + `generate_id()`) | 2.6 MB | ~520 bytes/doc |
 | Real CouchDB | 1.74 MB | ~365 bytes/doc |
-| **Ratio** | | **CouchDB uses ~3.5x less disk** |
+| **Ratio (after fix)** | | CouchDB uses **~1.5x less disk** (down from ~3.5x) |
 
-**This is a real trade-off, not spin-worthy, so it's reported plainly.**
-The likely cause: every write here re-serializes the *entire* revision
-tree (all history for that doc, as a JSON-encoded `HashMap`) rather than
-appending just the new revision — see `db/src/storage.rs::put_tree`.
-CouchDB's actual B-tree storage engine is far more space-efficient at
-this by design. This is a legitimate area for future optimization (not
-started — see `doc/open-questions.md`), not a claimed advantage.
+**The first measurement found a real, reported-plainly trade-off**: this
+server was using 3.5x more disk than CouchDB for identical data. Two
+root causes, both fixed in `db/src/storage.rs` and `db/src/main.rs`:
+
+1. **sled's zstd compression was available but off by default.** JSON
+   text compresses well; enabling it (`sled::Config::use_compression(true)`,
+   `compression` Cargo feature) was the larger of the two wins.
+2. **Every document write did three separate small sled writes**: the
+   document itself, an entry in the `_changes` sequence log, and a
+   hand-rolled read-modify-write on a counter stored in its own tree
+   just to generate that sequence number. That counter tree was pure
+   overhead — sled already has `Db::generate_id()`, a lock-free counter
+   that batches ids in memory and persists a checkpoint only
+   occasionally rather than writing to disk on every call. Replacing the
+   counter tree with `generate_id()`, and deriving `current_seq()` by
+   reading the highest key already in the sequence log instead of
+   maintaining a redundant separate value, removed a full extra write
+   per document.
+
+Trade-off of fix #1: write throughput dropped from ~56,800 to ~29,940
+docs/sec (compression costs CPU) — still ~8x faster than CouchDB, so a
+clearly worthwhile trade. The remaining ~1.5x gap versus CouchDB's
+purpose-built B-tree storage engine is a reasonable place to stop for
+now; closing it further would mean not re-storing a document's full
+revision-tree structure (parent pointers, deletion flags) as JSON on
+every write, which is a larger, riskier storage-format change — logged
+in `doc/open-questions.md` as a candidate for later, not attempted here.
+
+Verified this didn't regress anything: full unit suite (14 tests), both
+PouchDB integration tests, the load test, and the differential test
+against real CouchDB all still pass after the change.
 
 ## Summary for a one-line pitch
 
-> A ~2.76 MB single-file server, ~83x smaller to install than real
+> A ~4.4 MB single-file server, ~52x smaller to install than real
 > CouchDB's ~229 MB Erlang runtime, running the exact protocol surface a
 > real PouchDB client uses — verified byte-for-byte compatible with real
-> CouchDB's conflict-resolution behavior (see USAGE.md §5), roughly 17x
-> faster on bulk writes in this benchmark, and modestly faster on reads —
-> at the cost of ~3.5x more disk space per document, a known and
-> reported trade-off rather than a hidden one.
+> CouchDB's conflict-resolution behavior (see USAGE.md §5), ~8x faster on
+> bulk writes in this benchmark, modestly faster on reads, and within
+> ~1.5x of CouchDB's disk usage per document (down from ~3.5x after a
+> same-day fix) — every number here from an actual measured run, gaps
+> and all, not cherry-picked.

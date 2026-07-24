@@ -85,6 +85,17 @@ curl -u user:pass -X PUT http://127.0.0.1:5984/mydb
 # {"ok":true}
 ```
 
+### `DELETE /{db}`
+Delete a database. Not part of the replication protocol proper (a
+PouchDB client syncing with a remote never calls this) — added mainly
+for test/dev hygiene (tearing down disposable databases). 404 if the
+database doesn't exist.
+
+```bash
+curl -u user:pass -X DELETE http://127.0.0.1:5984/mydb
+# {"ok":true}
+```
+
 ### `GET /{db}`
 Database metadata.
 

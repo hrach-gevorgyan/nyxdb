@@ -79,16 +79,38 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
       and `_revs_diff` all matched exactly on first run.
 
 ## Phase 4 — Only if actually needed
+- [x] **On-disk storage size** — measured 3.5x more disk usage than real
+      CouchDB for identical data (`doc/BENCHMARKS.md`), which would have
+      been the one clear loss in an otherwise-favorable comparison.
+      Fixed two root causes: sled's zstd compression was available but
+      off by default (enabled it — the bigger win); every write did an
+      unnecessary extra sled write for a hand-rolled sequence counter
+      (replaced with sled's own lock-free `generate_id()`, and
+      `current_seq()` now reads the sequence log's own highest key
+      instead of maintaining redundant state). Result: 6.1MB → 2.6MB for
+      the same 5,000 docs (CouchDB: 1.74MB) — gap closed from ~3.5x to
+      ~1.5x. Cost: write throughput dropped from ~56,800 to ~29,940
+      docs/sec (compression is CPU work), still ~8x faster than CouchDB.
+      Verified no regression: full unit suite, both PouchDB integration
+      tests, load test, and differential test vs. real CouchDB all still
+      pass. Found and fixed a related gap along the way: `DELETE /{db}`
+      wasn't implemented at all (a 405 broke the differential test's own
+      cleanup) — added, matching real CouchDB.
 - [ ] Attachments
 - [ ] Mango/`_find` proxying
 - [ ] `_session` cookie auth
 
 ## Status
-Phases 0 through 3 all complete. Along the way, both load testing and
-differential testing against real CouchDB caught/confirmed real things
-(a dropped-changes bug under load, and — reassuringly — exact agreement
-with real CouchDB's conflict/winner-picking behavior). Still plaintext
-HTTP, so keep this on a trusted LAN until TLS is decided
-(doc/open-questions.md). Everything remaining (Phase 4: attachments,
-Mango, session auth) is explicitly "only if actually needed" — no known
-concrete need yet, so nothing is planned there without one.
+Phases 0 through 3 all complete, plus a Phase 4 storage-efficiency fix
+(see above) that closed most of the one clear disk-usage gap found in
+benchmarking. Along the way, load testing and differential testing
+against real CouchDB caught/confirmed real things (a dropped-changes bug
+under load, and — reassuringly — exact agreement with real CouchDB's
+conflict/winner-picking behavior). Still plaintext HTTP, so keep this on
+a trusted LAN until TLS is decided (doc/open-questions.md). Everything
+remaining in Phase 4 (attachments, Mango, session auth) is explicitly
+"only if actually needed" — no known concrete need yet, so nothing is
+planned there without one. The remaining ~1.5x disk-size gap vs. CouchDB
+is a known, logged candidate for further optimization (doc/open-questions.md),
+not attempted here since closing it further means changing how revision
+history is stored on disk — a larger, riskier change than this session's fix.

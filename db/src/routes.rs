@@ -55,7 +55,7 @@ fn internal_error() -> ApiError {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(server_info))
-        .route("/:db", put(create_db).get(db_info))
+        .route("/:db", put(create_db).get(db_info).delete(delete_db))
         .route("/:db/:id", get(get_doc).put(put_doc))
         .route("/:db/_bulk_docs", post(bulk_docs))
         .route("/:db/_revs_diff", post(revs_diff))
@@ -94,6 +94,26 @@ async fn db_info(
     let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
     let doc_count = db.docs.len();
     Ok(Json(json!({"db_name": db_name, "doc_count": doc_count})))
+}
+
+/// `DELETE /{db}` — not part of the replication protocol proper (a
+/// PouchDB client never calls this against a remote it's syncing with),
+/// but a reasonable, low-risk admin operation to support — mainly useful
+/// for test/dev hygiene (tearing down disposable databases) rather than
+/// anything client-driven sync depends on.
+async fn delete_db(
+    State(state): State<AppState>,
+    Path(db_name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let docs_tree_name = format!("{db_name}::docs");
+    let existed = state.root.tree_names().iter().any(|n| n == docs_tree_name.as_bytes());
+    if !existed {
+        return Err(not_found());
+    }
+    for suffix in ["docs", "local", "seq"] {
+        state.root.drop_tree(format!("{db_name}::{suffix}")).map_err(|_| internal_error())?;
+    }
+    Ok(Json(json!({"ok": true})))
 }
 
 #[derive(serde::Deserialize)]

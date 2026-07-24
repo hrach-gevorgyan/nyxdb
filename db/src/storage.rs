@@ -7,19 +7,27 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Db {
+    /// The shared root, kept around for `generate_id()` — a lock-free,
+    /// mostly-in-memory monotonic counter (batches of ids are persisted
+    /// together, not one disk write per id) that replaced a hand-rolled
+    /// `update_and_fetch` counter tree. That counter tree cost one full
+    /// extra sled write per document write for no benefit over sled's
+    /// own primitive — removing it was one of two changes (the other
+    /// being zstd compression, see `main.rs`) that closed most of the
+    /// on-disk-size gap found in `doc/BENCHMARKS.md`.
+    base: sled::Db,
     pub docs: sled::Tree,
     pub local: sled::Tree,
     pub seq_log: sled::Tree,
-    pub meta: sled::Tree,
 }
 
 impl Db {
     pub fn open(base: &sled::Db, name: &str) -> sled::Result<Self> {
         Ok(Self {
+            base: base.clone(),
             docs: base.open_tree(format!("{name}::docs"))?,
             local: base.open_tree(format!("{name}::local"))?,
             seq_log: base.open_tree(format!("{name}::seq"))?,
-            meta: base.open_tree(format!("{name}::meta"))?,
         })
     }
 
@@ -35,7 +43,7 @@ impl Db {
         // non-self-describing format can't deserialize (DeserializeAnyNotSupported).
         let bytes = serde_json::to_vec(tree).expect("revtree must serialize");
         self.docs.insert(doc_id, bytes)?;
-        let seq = self.next_seq()?;
+        let seq = self.base.generate_id()?;
         self.seq_log.insert(seq.to_be_bytes(), doc_id)?;
         Ok(seq)
     }
@@ -44,6 +52,11 @@ impl Db {
     /// `seq > since`, in order. Multiple entries can name the same
     /// `doc_id` (each write appends one) — callers dedupe, keeping the
     /// highest seq per doc, same as real CouchDB's `_changes` semantics.
+    ///
+    /// Note: `generate_id()` is a global counter shared across every
+    /// database, so a given db's sequence numbers can have gaps where
+    /// another db's writes landed — that's fine, callers only need
+    /// "monotonically increasing for this db," not "contiguous."
     pub fn changes_since(&self, since: u64) -> sled::Result<Vec<(u64, String)>> {
         let start = (since + 1).to_be_bytes();
         self.seq_log
@@ -57,26 +70,18 @@ impl Db {
             .collect()
     }
 
+    /// Highest seq this db has assigned, read directly off `seq_log`'s
+    /// last key rather than a separately maintained counter — one less
+    /// piece of state that could drift out of sync with reality.
     pub fn current_seq(&self) -> sled::Result<u64> {
         Ok(self
-            .meta
-            .get("update_seq")?
-            .map(|b| u64::from_be_bytes(b.as_ref().try_into().unwrap()))
+            .seq_log
+            .iter()
+            .keys()
+            .next_back()
+            .transpose()?
+            .map(|k| u64::from_be_bytes(k.as_ref().try_into().unwrap()))
             .unwrap_or(0))
-    }
-
-    fn next_seq(&self) -> sled::Result<u64> {
-        let seq = self
-            .meta
-            .update_and_fetch("update_seq", |old| {
-                let n = old
-                    .map(|b| u64::from_be_bytes(b.try_into().unwrap_or_default()))
-                    .unwrap_or(0)
-                    + 1;
-                Some(n.to_be_bytes().to_vec())
-            })?
-            .expect("update_and_fetch always returns Some");
-        Ok(u64::from_be_bytes(seq.as_ref().try_into().unwrap()))
     }
 }
 

@@ -24,6 +24,15 @@ each explicitly before the phase that needs it (see plan §7).
       revisit if transactional guarantees become a pain point.
 - [ ] Hash function for revision ids — SHA-256 truncated is the current
       lean; only matters if byte-for-byte CouchDB interop is ever needed.
+- [ ] On-disk size is within ~1.5x of real CouchDB per document (down
+      from ~3.5x — see `doc/BENCHMARKS.md`), after enabling sled's zstd
+      compression and removing a redundant sequence-counter write. The
+      remaining gap is likely `put_tree` re-serializing a doc's entire
+      revision-tree structure (all history, as JSON) on every write
+      rather than appending only the new revision. Closing it further
+      means changing the on-disk storage format — a bigger, riskier
+      change than the fixes so far — worth doing only if disk usage at
+      real scale (not a 5,000-doc benchmark) turns out to matter.
 
 ## Scope
 - [ ] Do we ever need `_session` cookie auth (browser-direct, non-WebView
@@ -35,5 +44,8 @@ each explicitly before the phase that needs it (see plan §7).
       needs an answer before this is usable end-to-end.
 
 ## Process
-- [ ] Differential testing against real CouchDB requires Docker — confirm
-      this is acceptable as a manual/pre-release gate rather than CI-blocking.
+- [x] Differential testing against real CouchDB — resolved: doesn't
+      require Docker specifically, just *a* real CouchDB instance
+      (Docker, a native install, or hosted). Verified against a native
+      local CouchDB 3.5.2 install (`test/differential/run.js`). Manual/
+      pre-release, not CI-blocking, since it needs that external instance.
