@@ -2,11 +2,14 @@
 
 Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8.
 
-## Phase 0 — Spike
+## Phase 0 — Spike (done)
 - [x] `PUT /{db}`, `GET /{db}`
 - [x] `_bulk_docs` (no conflicts yet, single-writer, last-write-wins)
 - [x] `GET/PUT /{db}/{id}` (single write path, last-write-wins)
-- [ ] Prove one-shot single-direction replication against a real PouchDB client
+- [x] `GET/PUT /{db}/_local/{id}` (checkpoints, needed even for one-shot push)
+- [x] `_revs_diff` (minimal presence check, no possible_ancestors yet)
+- [x] Prove one-shot single-direction replication against a real PouchDB client
+      (`test/integration/run.js`, `db.replicate.to()`, 2 docs, passing)
 
 ## Phase 1 — Real revision trees
 - [ ] Multi-revision tracking (per-doc revision tree)
@@ -34,5 +37,5 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
 - [ ] `_session` cookie auth
 
 ## Status
-Phase 0 nearly done: `PUT/GET /{db}`, `GET/PUT /{db}/{id}`, `_bulk_docs`
-implemented and manually verified. Remaining: real PouchDB client test.
+Phase 0 complete: verified end-to-end with a real PouchDB client
+(`db.replicate.to()`). Starting Phase 1 next.
