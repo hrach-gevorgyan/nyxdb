@@ -1,0 +1,12 @@
+{
+  "name": "couchdb-clone-integration-tests",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "test": "node run.js"
+  },
+  "dependencies": {
+    "pouchdb": "^8.0.1",
+    "pouchdb-adapter-http": "^8.0.1"
+  }
+}

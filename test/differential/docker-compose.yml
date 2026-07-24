@@ -1,0 +1,8 @@
+services:
+  couchdb:
+    image: couchdb:3
+    ports:
+      - "5985:5984"
+    environment:
+      COUCHDB_USER: admin
+      COUCHDB_PASSWORD: admin
