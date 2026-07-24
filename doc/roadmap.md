@@ -25,7 +25,10 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
 - [ ] `_bulk_get`
 - [x] Winner-picking algorithm (generation + hash tiebreak) — implemented
       and unit-tested in `db/src/revtree.rs`
-- [ ] `_conflicts` wired into `GET /{db}/{id}?conflicts=true`
+- [x] `_conflicts` wired into `GET /{db}/{id}?conflicts=true`. Also fixed
+      a related gap while in there: a fully-deleted doc now correctly
+      404s with `reason:"deleted"` instead of returning its tombstone
+      body with 200.
 
 ## Phase 2 — Live replication
 - [ ] `_changes` normal mode
@@ -46,7 +49,6 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
 - [ ] `_session` cookie auth
 
 ## Status
-Phase 0 complete. Phase 1: revision-tree logic (winner-picking, conflicts,
-deletion/recreation, missing-revs) and `new_edits:false` push are done
-and tested. Next: wire `_conflicts` into `GET /{db}/{id}?conflicts=true`,
-then `_bulk_get`.
+Phase 0 complete. Phase 1: revision trees, `new_edits:false` push, and
+`_conflicts`/deleted-doc handling on `GET` are done and tested. Next:
+`_bulk_get`, then Phase 2 (`_changes` feed).

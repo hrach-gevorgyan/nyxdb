@@ -45,3 +45,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   last-write-wins rev. Verified manually over HTTP: a full 3-generation
   push, followed by a diverging push at the same parent, correctly
   produces a real conflict resolved by the existing hash tiebreak.
+- Wired `_conflicts` into `GET /{db}/{id}?conflicts=true` (only present
+  in the response when non-empty, matching real CouchDB). Also fixed: a
+  fully-deleted doc previously returned 200 with its tombstone body;
+  `ApiError` now carries a distinct `reason` per case, and `get_doc`
+  returns 404 `{"error":"not_found","reason":"deleted"}` for it. Verified
+  manually over HTTP (conflict listing, and delete-then-404 sequence) and
+  confirmed no regression in unit tests or the PouchDB integration test.

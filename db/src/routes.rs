@@ -5,7 +5,7 @@
 use crate::revtree::RevNode;
 use crate::storage::Db;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -22,26 +22,28 @@ pub struct AppState {
 /// CouchDB clients (PouchDB included) expect a JSON body on error
 /// responses, e.g. `{"error":"not_found","reason":"missing"}` — a bare
 /// status code with an empty body fails their JSON parsing.
-struct ApiError(StatusCode, &'static str);
+struct ApiError(StatusCode, &'static str, &'static str);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let reason = match self.0 {
-            StatusCode::NOT_FOUND => "missing",
-            StatusCode::PRECONDITION_FAILED => "file_exists",
-            StatusCode::BAD_REQUEST => "bad_request",
-            _ => "internal_error",
-        };
-        (self.0, Json(json!({"error": self.1, "reason": reason}))).into_response()
+        (self.0, Json(json!({"error": self.1, "reason": self.2}))).into_response()
     }
 }
 
 fn not_found() -> ApiError {
-    ApiError(StatusCode::NOT_FOUND, "not_found")
+    ApiError(StatusCode::NOT_FOUND, "not_found", "missing")
+}
+
+/// A doc whose current winning revision is a tombstone: real CouchDB
+/// reports this the same as a wholesale-missing doc on a plain `GET`
+/// (no `rev=`/`open_revs=` requesting the tombstone explicitly) — the
+/// distinguishing `reason` is what tells a client the id used to exist.
+fn deleted() -> ApiError {
+    ApiError(StatusCode::NOT_FOUND, "not_found", "deleted")
 }
 
 fn internal_error() -> ApiError {
-    ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+    ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "internal_error")
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -70,7 +72,7 @@ async fn create_db(
     let docs_tree_name = format!("{db_name}::docs");
     let existed = state.root.tree_names().iter().any(|n| n == docs_tree_name.as_bytes());
     if existed {
-        return Err(ApiError(StatusCode::PRECONDITION_FAILED, "file_exists"));
+        return Err(ApiError(StatusCode::PRECONDITION_FAILED, "file_exists", "file_exists"));
     }
     Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true})))
@@ -85,18 +87,34 @@ async fn db_info(
     Ok(Json(json!({"db_name": db_name, "doc_count": doc_count})))
 }
 
+#[derive(serde::Deserialize)]
+struct GetDocParams {
+    #[serde(default)]
+    conflicts: bool,
+}
+
 async fn get_doc(
     State(state): State<AppState>,
     Path((db_name, id)): Path<(String, String)>,
+    Query(params): Query<GetDocParams>,
 ) -> Result<Json<Value>, ApiError> {
     let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
     let tree = db.get_tree(&id).map_err(|_| internal_error())?;
     let tree = tree.ok_or_else(not_found)?;
     let winner = tree.winner().ok_or_else(not_found)?;
     let node = &tree.nodes[winner];
+    if node.deleted {
+        return Err(deleted());
+    }
     let mut body = node.body.clone();
     body["_id"] = json!(id);
     body["_rev"] = json!(winner);
+    if params.conflicts {
+        let conflicts = tree.conflicts();
+        if !conflicts.is_empty() {
+            body["_conflicts"] = json!(conflicts);
+        }
+    }
     Ok(Json(body))
 }
 
@@ -155,7 +173,7 @@ async fn bulk_docs(
     let docs = payload
         .get("docs")
         .and_then(Value::as_array)
-        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "bad_request"))?;
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
     let new_edits = payload.get("new_edits").and_then(Value::as_bool).unwrap_or(true);
 
     if new_edits {
@@ -267,7 +285,7 @@ async fn revs_diff(
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
-    let requested = payload.as_object().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "bad_request"))?;
+    let requested = payload.as_object().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
 
     let mut result = serde_json::Map::new();
     for (doc_id, revs) in requested {
