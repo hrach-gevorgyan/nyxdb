@@ -205,3 +205,35 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
     the remaining, larger-effort disk-size levers (dictionary
     compression, tighter rev-id encoding) left for if real-scale usage
     ever shows the gap matters.
+- Removed `rust-couchdb-clone-plan.md` and `suggestions.md` (cleanup):
+  both fully superseded/consumed — the plan doc's rationale by
+  `doc/USAGE.md` and `doc/changelog.md`, the suggestions doc by having
+  already tested every scenario it proposed. Fixed every dangling
+  reference across README.md and `doc/*.md`. Still recoverable from git
+  history.
+- Attempted dictionary-based zstd compression to close the remaining
+  ~1.33x disk-size gap further — **implemented, measured, and reverted**.
+  A static ~2KB "raw content" dictionary (not formally trained; no
+  sample corpus exists ahead of time for an arbitrary app's documents)
+  was meant to let compression reclaim cross-document redundancy that
+  sled's per-value compression can't see. First attempt rebuilt the
+  dictionary's compression tables on every write, dropping throughput
+  from ~23,585 to ~1,942 docs/sec (over 10x) — fixed by caching a
+  prepared `EncoderDictionary`/`DecoderDictionary` in a `OnceLock` and
+  reusing it via `with_prepared_dictionary`. Even after that fix,
+  **disk size got worse, not better: 2.31MB → 3.00MB (+29.8%)**, and
+  throughput was still less than half the pre-dictionary rate
+  (~10,309 docs/sec). Root cause: fixed per-frame zstd overhead (magic
+  number, header, dictionary ID reference) outweighs whatever
+  cross-document redundancy an untrained, generic dictionary captures,
+  for payloads this tiny (~200-400 bytes each). Reverted entirely
+  (`db/src/storage.rs`, `db/src/dictionary.rs` removed, `zstd` dropped
+  as a direct dependency — sled's own internal use is unaffected) rather
+  than kept behind a flag, since it had no upside in this form. This is
+  the honest-measurement process working as intended: a plausible,
+  well-reasoned idea caught failing in practice before it shipped.
+  Verified the revert restored the known-good state exactly (disk size
+  reproduced at 2,423,725 bytes on repeat) and all tests still pass.
+  Logged in `doc/open-questions.md` as a tried-and-failed approach, with
+  what would actually need to change (training data, or batching many
+  documents per compressed frame) for it to plausibly work.

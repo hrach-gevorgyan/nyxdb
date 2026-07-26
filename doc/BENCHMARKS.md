@@ -142,23 +142,59 @@ The knob is left in place (harmless, might matter for larger documents
 in other use cases) but it is not the throughput fix `suggestions.md`
 assumed it would be.
 
-Trade-off across both real fixes: write throughput dropped from
-~56,800 → ~29,940 (zstd) → ~23,585 docs/sec (binary encoding) — each
-step traded some write-side CPU for less disk. Still **~7.2x faster
-than CouchDB** at the end of both changes, so clearly worth it. The
-remaining 1.33x gap versus CouchDB's purpose-built B-tree storage
-engine is a reasonable place to stop; closing it further would mean
-either dictionary-based compression (bypassing sled's built-in
-per-value compression entirely to share a trained dictionary across
-documents — real engineering effort, not a config flag) or further
-tightening the binary rev-id encoding (e.g. splitting `"1-<hex>"` into
-a raw `u64` generation + fixed-width hash bytes instead of a string) —
-both logged in `doc/open-questions.md` as candidates, not attempted here
-since the remaining gap is now small relative to the effort to close it.
+**v3 → attempted v4, reverted: dictionary compression made things worse
+on both axes.** The theory was sound — sled compresses each value
+independently with no shared context, so cross-document redundancy
+(repeated JSON field names across every document) can't be reclaimed by
+per-value compression alone. Implemented it: a static ~2KB "raw content"
+dictionary of common JSON/CouchDB vocabulary (not formally trained via
+`ZDICT_trainFromBuffer`, since there's no sample corpus available ahead
+of time for an arbitrary app's documents), applied via `zstd`'s
+dictionary API at the storage layer. Two real problems surfaced by
+actually measuring it, not by reasoning about it in advance:
 
-Verified none of this regressed anything: full unit suite (14 tests),
-both PouchDB integration tests, the load test, and the differential
-test against real CouchDB all still pass after each change.
+1. **First attempt (rebuilding the dictionary's compression tables on
+   every single write) dropped throughput from ~23,585 to ~1,942
+   docs/sec** — over 10x. Fixed by preparing the dictionary once
+   (`EncoderDictionary`/`DecoderDictionary`, cached in a `OnceLock`) and
+   reusing it via `with_prepared_dictionary` instead of rebuilding per
+   call.
+2. **Even with the cached dictionary, disk size got *worse*, not
+   better: 2.31MB → 3.00MB, a 29.8% regression** — and throughput was
+   still only ~10,309 docs/sec, less than half the pre-dictionary rate.
+   The likely cause: each zstd streaming frame carries fixed overhead
+   (magic number, frame header, a dictionary ID reference, since a
+   dictionary was used) — for genuinely tiny payloads (~200-400 bytes
+   per document), that fixed per-frame cost outweighs whatever
+   cross-document redundancy an untrained, generic dictionary manages
+   to capture. The technique likely needs either much larger payloads
+   per compressed unit (batching many documents into one frame, a
+   bigger architecture change) or a properly *trained* dictionary from
+   real sample data (which requires the sample data to exist first) to
+   pay off — neither of which this attempt did.
+
+**Reverted entirely** rather than kept behind a flag — it has no upside
+in its current form, only cost, so there's nothing worth preserving.
+This is exactly the outcome honest measurement is for: a plausible,
+well-reasoned idea that made things worse in practice, caught before it
+shipped rather than assumed to be an improvement because the reasoning
+sounded right.
+
+Trade-off across the two real fixes that *did* work (zstd compression,
+binary tree encoding): write throughput dropped from ~56,800 → ~29,940
+→ ~23,585 docs/sec — each step traded some write-side CPU for less
+disk. Still **~7.2x faster than CouchDB**, so clearly worth it. The
+remaining 1.33x gap versus CouchDB's purpose-built B-tree storage
+engine is where this stops for now — the two next candidates (a
+properly trained dictionary with batched/larger compression units, or
+tighter binary rev-id packing) are logged in `doc/open-questions.md`,
+not attempted further given the gap is now small relative to the
+effort and given dictionary compression's naive form already failed
+once.
+
+Verified none of the changes that were kept regressed anything: full
+unit suite (14 tests), both PouchDB integration tests, the load test,
+and the differential test against real CouchDB all still pass.
 
 ## Memory and `_changes` latency — correcting two fabricated numbers
 

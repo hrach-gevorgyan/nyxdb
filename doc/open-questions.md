@@ -28,14 +28,24 @@ each explicitly before the phase that needs it (see plan §7).
       from ~3.5x across two rounds of fixes — see `doc/BENCHMARKS.md`):
       zstd compression, `generate_id()` instead of a redundant counter,
       and a bincode-encoded revision tree instead of JSON-wrapped.
-      Remaining candidates, neither attempted: (1) dictionary-based zstd
-      compression shared across documents (bypassing sled's built-in
-      per-value compression, which has no cross-document context to
-      exploit) — likely the bigger remaining lever; (2) packing rev ids
+      **Tried and reverted**: a static "raw content" dictionary shared
+      across documents (to reclaim cross-document redundancy, which
+      sled's per-value compression can't see) — even after fixing an
+      initial 10x throughput regression (caching the prepared dictionary
+      instead of rebuilding it per write), disk size got *worse*, not
+      better (2.31MB → 3.00MB), because per-frame zstd overhead
+      (magic number, header, dictionary ID) outweighs redundancy savings
+      for payloads this tiny (~200-400 bytes). Would need either a
+      properly *trained* dictionary (requires sample data that doesn't
+      exist ahead of time) or batching many documents into one
+      compressed frame (bigger architecture change) to plausibly pay
+      off — not attempted. Remaining untried candidate: packing rev ids
       as a raw `u64` generation + fixed-width hash bytes instead of a
-      `"1-<hex>"` string. Worth doing only if disk usage at real scale
-      (not a 5,000-doc benchmark) turns out to matter — the gap is now
-      small relative to the effort to close it further.
+      `"1-<hex>"` string — smaller, more contained change, modest
+      expected payoff. Worth doing only if disk usage at real scale (not
+      a 5,000-doc benchmark) turns out to matter — the gap is now small
+      relative to the effort to close it further, and one plausible
+      lever already failed empirically.
 - [ ] `suggestions.md` (external optimization doc) proposed a faster
       zstd compression level to recover write throughput lost to
       compression. Tested directly (`COUCHDB_CLONE_COMPRESSION_LEVEL` env
