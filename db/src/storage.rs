@@ -2,8 +2,61 @@
 //! revision tree, plus an append-only `(seq, doc_id)` log for `_changes`.
 //! See plan §4.3, §5.
 
-use crate::revtree::RevTree;
+use crate::revtree::{RevId, RevNode, RevTree};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// On-disk encoding for a `RevTree`. JSON-wrapping the tree directly
+/// (as an earlier version of this code did) repeats field names
+/// (`"parent"`, `"deleted"`, `"body"`) and the `HashMap` key for every
+/// single revision, which is pure overhead sled's per-value zstd
+/// compression can't fully reclaim (each value is compressed
+/// independently, so there's no cross-document dictionary to lean on —
+/// see `doc/BENCHMARKS.md`). `bincode` can't handle `serde_json::Value`
+/// directly (`DeserializeAnyNotSupported` — hit this once already, see
+/// `doc/changelog.md`), so the doc body is kept as pre-serialized raw
+/// JSON bytes instead of asking bincode to understand its shape.
+#[derive(Serialize, Deserialize)]
+struct StoredNode {
+    parent: Option<RevId>,
+    deleted: bool,
+    body: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct StoredTree {
+    nodes: Vec<(RevId, StoredNode)>,
+}
+
+impl From<&RevTree> for StoredTree {
+    fn from(tree: &RevTree) -> Self {
+        let nodes = tree
+            .nodes
+            .iter()
+            .map(|(rev, node)| {
+                let body = serde_json::to_vec(&node.body).expect("doc body must serialize");
+                (rev.clone(), StoredNode { parent: node.parent.clone(), deleted: node.deleted, body })
+            })
+            .collect();
+        StoredTree { nodes }
+    }
+}
+
+impl TryFrom<StoredTree> for RevTree {
+    type Error = serde_json::Error;
+
+    fn try_from(stored: StoredTree) -> Result<Self, Self::Error> {
+        let nodes = stored
+            .nodes
+            .into_iter()
+            .map(|(rev, node)| {
+                let body = serde_json::from_slice(&node.body)?;
+                Ok((rev, RevNode { parent: node.parent, deleted: node.deleted, body }))
+            })
+            .collect::<Result<_, serde_json::Error>>()?;
+        Ok(RevTree { nodes })
+    }
+}
 
 #[derive(Clone)]
 pub struct Db {
@@ -32,16 +85,14 @@ impl Db {
     }
 
     pub fn get_tree(&self, doc_id: &str) -> sled::Result<Option<RevTree>> {
-        Ok(self
-            .docs
-            .get(doc_id)?
-            .map(|bytes| serde_json::from_slice(&bytes).expect("corrupt revtree in storage")))
+        let Some(bytes) = self.docs.get(doc_id)? else { return Ok(None) };
+        let stored: StoredTree = bincode::deserialize(&bytes).expect("corrupt revtree in storage");
+        Ok(Some(RevTree::try_from(stored).expect("corrupt doc body JSON in storage")))
     }
 
     pub fn put_tree(&self, doc_id: &str, tree: &RevTree) -> sled::Result<u64> {
-        // RevTree embeds serde_json::Value doc bodies, which bincode's
-        // non-self-describing format can't deserialize (DeserializeAnyNotSupported).
-        let bytes = serde_json::to_vec(tree).expect("revtree must serialize");
+        let stored = StoredTree::from(tree);
+        let bytes = bincode::serialize(&stored).expect("revtree must serialize");
         self.docs.insert(doc_id, bytes)?;
         let seq = self.base.generate_id()?;
         self.seq_log.insert(seq.to_be_bytes(), doc_id)?;

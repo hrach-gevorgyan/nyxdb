@@ -41,14 +41,17 @@ async fn main() {
     // compress well, and enabling it was one of two changes (the other
     // being storage.rs's use of generate_id() instead of a hand-rolled
     // counter write) that closed most of the on-disk-size gap found in
-    // doc/BENCHMARKS.md.
-    let root = Arc::new(
-        sled::Config::new()
-            .path(&data_dir)
-            .use_compression(true)
-            .open()
-            .expect("failed to open sled database"),
-    );
+    // doc/BENCHMARKS.md. Level defaults to sled's own default (5);
+    // override via COUCHDB_CLONE_COMPRESSION_LEVEL (1-22, lower = faster
+    // but less compression) — exposed as an env var specifically to A/B
+    // this trade-off without rebuilding, per doc/BENCHMARKS.md's
+    // speed-vs-size experiment.
+    let mut config = sled::Config::new().path(&data_dir).use_compression(true);
+    if let Ok(level) = std::env::var("COUCHDB_CLONE_COMPRESSION_LEVEL") {
+        let level: i32 = level.parse().expect("COUCHDB_CLONE_COMPRESSION_LEVEL must be an integer 1-22");
+        config = config.compression_factor(level);
+    }
+    let root = Arc::new(config.open().expect("failed to open sled database"));
 
     let creds = Credentials::load_or_generate(Path::new(&data_dir)).expect("failed to load/generate credentials");
     tracing::info!(

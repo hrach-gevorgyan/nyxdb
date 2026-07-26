@@ -24,15 +24,27 @@ each explicitly before the phase that needs it (see plan §7).
       revisit if transactional guarantees become a pain point.
 - [ ] Hash function for revision ids — SHA-256 truncated is the current
       lean; only matters if byte-for-byte CouchDB interop is ever needed.
-- [ ] On-disk size is within ~1.5x of real CouchDB per document (down
-      from ~3.5x — see `doc/BENCHMARKS.md`), after enabling sled's zstd
-      compression and removing a redundant sequence-counter write. The
-      remaining gap is likely `put_tree` re-serializing a doc's entire
-      revision-tree structure (all history, as JSON) on every write
-      rather than appending only the new revision. Closing it further
-      means changing the on-disk storage format — a bigger, riskier
-      change than the fixes so far — worth doing only if disk usage at
-      real scale (not a 5,000-doc benchmark) turns out to matter.
+- [ ] On-disk size is within ~1.33x of real CouchDB per document (down
+      from ~3.5x across two rounds of fixes — see `doc/BENCHMARKS.md`):
+      zstd compression, `generate_id()` instead of a redundant counter,
+      and a bincode-encoded revision tree instead of JSON-wrapped.
+      Remaining candidates, neither attempted: (1) dictionary-based zstd
+      compression shared across documents (bypassing sled's built-in
+      per-value compression, which has no cross-document context to
+      exploit) — likely the bigger remaining lever; (2) packing rev ids
+      as a raw `u64` generation + fixed-width hash bytes instead of a
+      `"1-<hex>"` string. Worth doing only if disk usage at real scale
+      (not a 5,000-doc benchmark) turns out to matter — the gap is now
+      small relative to the effort to close it further.
+- [ ] `suggestions.md` (external optimization doc) proposed a faster
+      zstd compression level to recover write throughput lost to
+      compression. Tested directly (`COUCHDB_CLONE_COMPRESSION_LEVEL` env
+      var, level 1 vs. default): no measurable effect on speed or size.
+      For documents this small (~200-400 bytes, compressed
+      independently), the effort-level knob doesn't have enough material
+      to work with — the fixed per-call compression overhead dominates.
+      Not a real lever for this workload; left in place as a knob in
+      case it matters for larger documents in some other use case.
 
 ## Scope
 - [ ] Do we ever need `_session` cookie auth (browser-direct, non-WebView

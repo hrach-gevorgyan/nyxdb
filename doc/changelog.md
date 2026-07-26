@@ -155,3 +155,51 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   test/dev hygiene. Also gave `test/differential/run.js` a cleanup step
   it was missing since it was first written (it never deleted its own
   disposable databases on either server).
+- Evaluated an external optimization proposal (`suggestions.md`) by
+  actually testing each claim rather than taking it on faith. Found two
+  of its five "current baseline" numbers were fabricated, not measured:
+  idle memory claimed as ~15MB (actually ~30.8MB, measured via
+  `Get-Process` working set/private bytes) and `_changes` latency
+  claimed as ~5-10ms (never measured before now). Correcting these
+  mattered because targets built on wrong baselines are either
+  fake-easy or impossible for the wrong reasons.
+  - Added `test/benchmark/changes_latency.js` to measure real
+    `_changes` propagation latency. Full HTTP round-trip (write ACK to
+    subscriber receiving it): ~13.4ms avg. Isolated in-process
+    propagation only (write already ACKed to broadcast-channel
+    delivery): ~0.14ms avg, p95 1ms — **already meets the "<1ms"
+    target** the suggestions doc proposed a ring-buffer cache to
+    achieve. The ~13ms end users would see is HTTP/TCP overhead on the
+    write itself, which no `_changes`-side caching touches.
+  - The proposed "<10MB active memory" target was never reachable — it
+    sits below the real *idle* baseline (~30.8MB working set), let
+    alone under load (~56-60MB measured with 30 concurrent `feed=continuous`
+    subscribers and a 5,000-doc batch).
+  - Tested the proposed "faster zstd level" fix for write-throughput
+    loss directly (`COUCHDB_CLONE_COMPRESSION_LEVEL` env var, level 1
+    vs. default): no measurable effect on speed or disk size. For
+    documents this small, compressed independently, the effort-level
+    knob doesn't have enough material to matter — fixed per-call
+    overhead dominates. Left as a configurable knob (harmless) but not
+    the fix it was proposed as.
+  - The one genuinely well-targeted idea — binary-packing the revision
+    tree instead of JSON-wrapping it — was implemented and measured: a
+    `bincode`-encoded `StoredTree`/`StoredNode` (`db/src/storage.rs`),
+    keeping the document body as pre-serialized raw JSON bytes since
+    `bincode` can't handle `serde_json::Value` directly (hit this exact
+    trap once before, see Phase 0 above). Result: 2.6MB → 2.31MB for
+    the same 5,000 docs — gap vs. CouchDB (1.74MB) closed from 1.5x to
+    1.33x. Cost: write throughput dropped further, ~29,940 → ~23,585
+    docs/sec — still ~7.2x faster than CouchDB. Corrected a units
+    mistake found while writing this up: the binary size after adding
+    zstd was previously reported as 4.42MB; it's actually 4.23MB
+    (~54x smaller than CouchDB's 229MB, not ~52x) — a MB-vs-MiB
+    inconsistency in earlier arithmetic, not a functional change.
+  - Verified none of this regressed anything: full unit suite (14
+    tests), both PouchDB integration tests, the load test, and the
+    differential test against real CouchDB all still pass.
+  - `doc/BENCHMARKS.md` rewritten with the full v1→v2→v3 progression
+    and the corrected baselines; `doc/open-questions.md` updated with
+    the remaining, larger-effort disk-size levers (dictionary
+    compression, tighter rev-id encoding) left for if real-scale usage
+    ever shows the gap matters.

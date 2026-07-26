@@ -96,6 +96,24 @@ Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8
       pass. Found and fixed a related gap along the way: `DELETE /{db}`
       wasn't implemented at all (a 405 broke the differential test's own
       cleanup) — added, matching real CouchDB.
+- [x] **Evaluated `suggestions.md`** (external optimization proposal)
+      by testing every claim rather than trusting it. Two of its five
+      "current" baseline numbers were fabricated (idle memory claimed
+      ~15MB, actually ~30.8MB; `_changes` latency claimed ~5-10ms, never
+      previously measured). Real findings: (1) full round-trip
+      `_changes` latency is ~13.4ms, dominated by HTTP overhead, but
+      isolated in-process propagation is already ~0.14ms — the "<1ms"
+      target is already met for the mechanism that actually matters;
+      (2) the proposed "<10MB active memory" target is below the real
+      idle baseline and was never reachable; (3) the proposed "faster
+      zstd level" fix for write throughput had no measurable effect,
+      tested directly; (4) the one well-targeted idea — binary-packing
+      the revision tree instead of JSON — was implemented and worked:
+      2.6MB → 2.31MB, closing the CouchDB gap from 1.5x to 1.33x, at the
+      cost of write throughput dropping to ~23,585 docs/sec (still
+      ~7.2x faster than CouchDB). Full details and exact numbers in
+      `doc/BENCHMARKS.md`. Verified no regression across the full test
+      suite.
 - [ ] Attachments
 - [ ] Mango/`_find` proxying
 - [ ] `_session` cookie auth
