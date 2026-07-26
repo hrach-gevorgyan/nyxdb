@@ -30,26 +30,33 @@ each explicitly before the phase that needs it (see plan §7).
       a bincode-encoded revision tree instead of JSON-wrapped, and
       varint integer/length encoding (`bincode_options()` in
       `storage.rs`) instead of bincode's default fixed-width 8-byte
-      prefixes. **Tried and reverted**: a static "raw content" dictionary
-      shared across documents (to reclaim cross-document redundancy,
-      which sled's per-value compression can't see) — even after fixing
-      an initial 10x throughput regression (caching the prepared
-      dictionary instead of rebuilding it per write), disk size got
-      *worse*, not better (2.31MB → 3.00MB), because per-frame zstd
-      overhead (magic number, header, dictionary ID) outweighs
-      redundancy savings for payloads this tiny (~200-400 bytes). Would
-      need either a properly *trained* dictionary (requires sample data
-      that doesn't exist ahead of time) or batching many documents into
-      one compressed frame (bigger architecture change) to plausibly pay
-      off — not attempted. **Deliberately not attempted**: packing rev
-      ids as raw `u64` generation + fixed-width hash bytes instead of a
+      prefixes. **Tried and reverted twice**: a static "raw content"
+      dictionary shared across documents (to reclaim cross-document
+      redundancy, which sled's per-value compression can't see) — first
+      via zstd's streaming frame API (per-frame overhead outweighed the
+      benefit for ~200-400 byte payloads: 2.31MB → 3.00MB), then via
+      zstd's raw block API with a cached prepared dictionary (the same
+      zero-overhead primitive sled itself uses internally — technically
+      sound, still made things worse: 2.26MB → 3.01-3.07MB across two
+      compression levels tested). Disabling sled's own compression
+      entirely to isolate the cause made it far worse still (4.78MB),
+      showing sled's own plain per-item compression already outperforms
+      a generic untrained ~2KB dictionary for this data. Two
+      independent implementations failing the same way is strong enough
+      evidence to stop pursuing generic-dictionary compression here.
+      Remaining candidates, neither attempted: (1) a *properly trained*
+      dictionary (`ZDICT_trainFromBuffer` against real sample data,
+      which doesn't exist ahead of time for an arbitrary app's
+      documents — would need to be trained adaptively after some number
+      of real writes, a real architecture change); (2) packing rev ids
+      as raw `u64` generation + fixed-width hash bytes instead of a
       `"1-<hex>"` string — the hash string is compared byte-for-byte in
       winner-picking's tiebreak, so repacking it risks a subtle
       round-trip mismatch in exactly the code path differential testing
       exists to protect, for a modest expected payoff now that varint
       encoding already captured most of the easy win. Worth revisiting
-      only if disk usage at real scale (not a 5,000-doc benchmark) turns
-      out to matter.
+      either only if disk usage at real scale (not a 5,000-doc
+      benchmark) turns out to matter.
 - [ ] `suggestions.md` (external optimization doc) proposed a faster
       zstd compression level to recover write throughput lost to
       compression. Tested directly (`COUCHDB_CLONE_COMPRESSION_LEVEL` env

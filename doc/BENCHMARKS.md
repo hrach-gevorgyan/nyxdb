@@ -205,15 +205,49 @@ payloads compress and write faster, a rare case where a size fix helped
 speed instead of costing it. Verified reproducible (identical byte
 count, 2,364,966, across two independent runs).
 
+**A second dictionary-compression attempt, also reverted.** After
+confirming memory was already a winning metric (below), pushed further
+on disk size with a more careful retry: instead of the streaming frame
+API (attempt #1, reverted), used zstd's *raw block* API
+(`zstd_safe::CCtx::compress_using_cdict`/`DCtx::decompress_using_ddict`)
+— the same low-level, zero-framing-overhead primitive sled itself uses
+internally, with a cached prepared `CDict`/`DDict` (avoiding attempt
+#1's other mistake, rebuilding dictionary tables per call) and a
+compact 4-byte length prefix instead of a self-describing frame header.
+Technically sound, correctly implemented, still made things worse:
+
+| | Disk size (5,000 docs) |
+|---|---|
+| v5 baseline (no app-level dictionary) | 2.26 MB |
+| Raw-block dictionary, level 3 | 3.07 MB |
+| Raw-block dictionary, level 5 (matched to sled's default) | 3.01 MB |
+| Raw-block dictionary, **with sled's own compression disabled** | 4.78 MB |
+
+The last row is the most informative: with sled's built-in compression
+turned off entirely, relying solely on the custom dictionary layer,
+disk usage got *dramatically* worse (4.78MB) — worse than the original
+uncompressed-JSON baseline from before any fixes (6.1MB) would suggest
+this should be. **sled's own plain (non-dictionary) per-item zstd
+compression at its default level is simply more effective for this
+data than a generic, untrained, ~2KB static dictionary compressing
+bincode-wrapped bytes.** Two independent, differently-implemented
+attempts at dictionary compression (streaming frames, then raw blocks)
+have now both underperformed the simpler "let sled handle it" baseline
+— strong enough evidence to stop pursuing generic-dictionary
+compression for this workload rather than trying a third variant.
+Reverted again in full.
+
 Trade-off across the three fixes that stuck (zstd compression, binary
 tree encoding, varint bincode config): write throughput went
 ~56,800 → ~29,940 → ~23,585 → ~26,178 docs/sec — still **~7.5x faster
 than CouchDB**. The remaining 1.29x disk gap versus CouchDB's
-purpose-built B-tree storage engine is where this stops for now — the
-one untried candidate (a properly trained dictionary with batched/larger
-compression units, since the naive per-value dictionary approach
-already failed) is logged in `doc/open-questions.md`, not attempted
-given the gap is now small relative to the effort and risk.
+purpose-built B-tree storage engine is where this stops — the two
+remaining candidates (a *properly trained* dictionary, which needs
+real sample data that doesn't exist ahead of time to be worth trying a
+third time; or raw-byte rev-id packing, deliberately not attempted for
+correctness-risk reasons) are logged in `doc/open-questions.md`, not
+pursued further given diminishing returns and two dictionary attempts
+already failing independently.
 
 Verified none of the changes that were kept regressed anything: full
 unit suite (14 tests), both PouchDB integration tests, the load test,

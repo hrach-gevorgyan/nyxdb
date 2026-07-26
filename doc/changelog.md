@@ -269,3 +269,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   payoff. Verified no regression: full unit suite (14 tests), both
   PouchDB integration tests, the load test, and the differential test
   against real CouchDB all still pass.
+- Second dictionary-compression attempt, also implemented, measured,
+  and reverted. Retried more carefully after the first failure: used
+  zstd's *raw block* API (`zstd_safe::CCtx::compress_using_cdict`/
+  `DCtx::decompress_using_ddict`, the same zero-framing-overhead
+  primitive sled itself uses internally) instead of the streaming frame
+  API, with a cached prepared `CDict`/`DDict` and a compact 4-byte
+  length prefix instead of a self-describing frame header — correctly
+  addressing both problems found in attempt #1. Still made disk usage
+  worse: 2.26MB → 3.07MB at compression level 3, 3.01MB at level 5
+  (matched to sled's own default, ruling out a level mismatch as the
+  cause). Disabling sled's own compression entirely to isolate the
+  effect made it far worse (4.78MB) — revealing that sled's own plain,
+  non-dictionary per-item compression at its default settings already
+  outperforms a generic ~2KB untrained dictionary for this data. Two
+  independently-implemented dictionary-compression attempts failing the
+  same way is strong evidence to stop pursuing this approach rather
+  than trying a third variant. Reverted again in full (`db/src/storage.rs`,
+  `db/src/dictionary.rs` removed, `zstd` dropped as a direct dependency
+  a second time). Verified the revert restored the known-good state
+  (2,373,714 bytes, within normal run-to-run variance of the documented
+  2,364,966) and all tests still pass.
