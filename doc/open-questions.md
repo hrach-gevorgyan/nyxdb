@@ -24,28 +24,32 @@ each explicitly before the phase that needs it (see plan §7).
       revisit if transactional guarantees become a pain point.
 - [ ] Hash function for revision ids — SHA-256 truncated is the current
       lean; only matters if byte-for-byte CouchDB interop is ever needed.
-- [ ] On-disk size is within ~1.33x of real CouchDB per document (down
-      from ~3.5x across two rounds of fixes — see `doc/BENCHMARKS.md`):
+- [ ] On-disk size is within ~1.29x of real CouchDB per document (down
+      from ~3.5x across three rounds of fixes — see `doc/BENCHMARKS.md`):
       zstd compression, `generate_id()` instead of a redundant counter,
-      and a bincode-encoded revision tree instead of JSON-wrapped.
-      **Tried and reverted**: a static "raw content" dictionary shared
-      across documents (to reclaim cross-document redundancy, which
-      sled's per-value compression can't see) — even after fixing an
-      initial 10x throughput regression (caching the prepared dictionary
-      instead of rebuilding it per write), disk size got *worse*, not
-      better (2.31MB → 3.00MB), because per-frame zstd overhead
-      (magic number, header, dictionary ID) outweighs redundancy savings
-      for payloads this tiny (~200-400 bytes). Would need either a
-      properly *trained* dictionary (requires sample data that doesn't
-      exist ahead of time) or batching many documents into one
-      compressed frame (bigger architecture change) to plausibly pay
-      off — not attempted. Remaining untried candidate: packing rev ids
-      as a raw `u64` generation + fixed-width hash bytes instead of a
-      `"1-<hex>"` string — smaller, more contained change, modest
-      expected payoff. Worth doing only if disk usage at real scale (not
-      a 5,000-doc benchmark) turns out to matter — the gap is now small
-      relative to the effort to close it further, and one plausible
-      lever already failed empirically.
+      a bincode-encoded revision tree instead of JSON-wrapped, and
+      varint integer/length encoding (`bincode_options()` in
+      `storage.rs`) instead of bincode's default fixed-width 8-byte
+      prefixes. **Tried and reverted**: a static "raw content" dictionary
+      shared across documents (to reclaim cross-document redundancy,
+      which sled's per-value compression can't see) — even after fixing
+      an initial 10x throughput regression (caching the prepared
+      dictionary instead of rebuilding it per write), disk size got
+      *worse*, not better (2.31MB → 3.00MB), because per-frame zstd
+      overhead (magic number, header, dictionary ID) outweighs
+      redundancy savings for payloads this tiny (~200-400 bytes). Would
+      need either a properly *trained* dictionary (requires sample data
+      that doesn't exist ahead of time) or batching many documents into
+      one compressed frame (bigger architecture change) to plausibly pay
+      off — not attempted. **Deliberately not attempted**: packing rev
+      ids as raw `u64` generation + fixed-width hash bytes instead of a
+      `"1-<hex>"` string — the hash string is compared byte-for-byte in
+      winner-picking's tiebreak, so repacking it risks a subtle
+      round-trip mismatch in exactly the code path differential testing
+      exists to protect, for a modest expected payoff now that varint
+      encoding already captured most of the easy win. Worth revisiting
+      only if disk usage at real scale (not a 5,000-doc benchmark) turns
+      out to matter.
 - [ ] `suggestions.md` (external optimization doc) proposed a faster
       zstd compression level to recover write throughput lost to
       compression. Tested directly (`COUCHDB_CLONE_COMPRESSION_LEVEL` env
@@ -55,6 +59,11 @@ each explicitly before the phase that needs it (see plan §7).
       to work with — the fixed per-call compression overhead dominates.
       Not a real lever for this workload; left in place as a knob in
       case it matters for larger documents in some other use case.
+- [x] Memory usage vs. real CouchDB — resolved: measured on both sides
+      (previously only ever measured for this server). This server is
+      ~3x lighter idle (~30.8MB vs. ~93.5MB) and ~2x lighter under a
+      comparable load (~56-60MB vs. ~115.7MB, both working set via
+      `Get-Process`). Not a gap to close — a real, verified advantage.
 
 ## Scope
 - [ ] Do we ever need `_session` cookie auth (browser-direct, non-WebView

@@ -117,6 +117,19 @@ PouchDB client uses, not a general CouchDB replacement. See
       ~7.2x faster than CouchDB). Full details and exact numbers in
       `doc/BENCHMARKS.md`. Verified no regression across the full test
       suite.
+- [x] **Measured memory against real CouchDB and closed more of the
+      disk gap.** Memory (previously only ever measured for this
+      server): this server is ~3x lighter idle (~30.8MB vs. ~93.5MB) and
+      ~2x lighter under comparable load (~56-60MB vs. ~115.7MB) —
+      confirmed winning, not a gap. Disk: switched bincode's default
+      fixed-width 8-byte integer/length encoding to varint
+      (`with_varint_encoding()`), a safer lever than the reverted
+      dictionary attempt since it never touches the revision-hash string
+      winner-picking compares byte-for-byte. Result: 2.31MB → 2.26MB
+      (gap vs. CouchDB: 1.33x → 1.29x), plus write throughput improved
+      slightly as a side effect (~23,585 → ~26,178 docs/sec, ~7.5x
+      faster than CouchDB). Full numbers in `doc/BENCHMARKS.md`.
+      Verified no regression across the full test suite.
 - [ ] Attachments
 - [ ] Mango/`_find` proxying
 - [ ] `_session` cookie auth

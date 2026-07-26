@@ -237,3 +237,35 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   Logged in `doc/open-questions.md` as a tried-and-failed approach, with
   what would actually need to change (training data, or batching many
   documents per compressed frame) for it to plausibly work.
+- Measured memory against real CouchDB for the first time (previously
+  only ever measured for this server, leaving "is memory also a
+  problem" an open question rather than a fact either way). Both
+  measured via `Get-Process` working set: this server is **~3x lighter
+  idle** (~30.8MB vs. CouchDB's ~93.5MB) and **~2x lighter under a
+  comparable load** (~56-60MB vs. ~115.7MB, 5,000-doc batch + 30
+  concurrent `feed=continuous` subscribers on each side). Memory is a
+  winning metric, not a gap — closes out that question with a real
+  number in both directions.
+- Closed more of the remaining disk-size gap with a safer lever than
+  the reverted dictionary attempt: bincode's top-level `serialize`/
+  `deserialize` functions turned out to use fixed-width 8-byte integers
+  and 8-byte length prefixes for every `String`/`Vec` regardless of
+  actual size (confirmed in bincode's own `config/legacy.rs`) — a
+  revision id string was paying an 8-byte prefix just to say "this is
+  18 bytes." Switched to `DefaultOptions::new().with_varint_encoding()`
+  (`bincode_options()` in `db/src/storage.rs`), which shrinks every one
+  of those prefixes with **no change to what's stored** — unlike the
+  reverted dictionary attempt, this never touches the revision-hash
+  string that winner-picking's tiebreak compares byte-for-byte, so it
+  carries none of that correctness risk. Result: 2.31MB → 2.26MB
+  (gap vs. CouchDB's 1.74MB: 1.33x → 1.29x), reproduced identically
+  (2,364,966 bytes) across two independent runs. Write throughput
+  *improved slightly* as a side effect (~23,585 → ~26,178 docs/sec,
+  ~7.5x faster than CouchDB) — smaller payloads compress and write
+  faster, a rare case where a size fix helped speed instead of costing
+  it. Deliberately did not attempt the other logged candidate (packing
+  rev ids as raw bytes instead of a hex string) given the correctness
+  risk to a differential-tested code path for a now-smaller expected
+  payoff. Verified no regression: full unit suite (14 tests), both
+  PouchDB integration tests, the load test, and the differential test
+  against real CouchDB all still pass.

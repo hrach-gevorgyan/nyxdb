@@ -3,8 +3,22 @@
 //! See plan §4.3, §5.
 
 use crate::revtree::{RevId, RevNode, RevTree};
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// `bincode::serialize`/`deserialize` (the top-level convenience
+/// functions) use fixed-width 8-byte integers and 8-byte length
+/// prefixes for every `String`/`Vec`, even for tiny values — confirmed
+/// in bincode's own source (`config/legacy.rs`). Varint encoding shrinks
+/// every one of those length prefixes and integer fields for the small
+/// values that dominate here (a handful of revisions, short strings),
+/// with no change to what's actually stored — pure encoding-density win,
+/// unlike the reverted dictionary-compression attempt which changed the
+/// underlying format. See `doc/BENCHMARKS.md`.
+fn bincode_options() -> impl bincode::Options {
+    bincode::DefaultOptions::new().with_varint_encoding()
+}
 
 /// On-disk encoding for a `RevTree`. JSON-wrapping the tree directly
 /// (as an earlier version of this code did) repeats field names
@@ -86,13 +100,13 @@ impl Db {
 
     pub fn get_tree(&self, doc_id: &str) -> sled::Result<Option<RevTree>> {
         let Some(bytes) = self.docs.get(doc_id)? else { return Ok(None) };
-        let stored: StoredTree = bincode::deserialize(&bytes).expect("corrupt revtree in storage");
+        let stored: StoredTree = bincode_options().deserialize(&bytes).expect("corrupt revtree in storage");
         Ok(Some(RevTree::try_from(stored).expect("corrupt doc body JSON in storage")))
     }
 
     pub fn put_tree(&self, doc_id: &str, tree: &RevTree) -> sled::Result<u64> {
         let stored = StoredTree::from(tree);
-        let bytes = bincode::serialize(&stored).expect("revtree must serialize");
+        let bytes = bincode_options().serialize(&stored).expect("revtree must serialize");
         self.docs.insert(doc_id, bytes)?;
         let seq = self.base.generate_id()?;
         self.seq_log.insert(seq.to_be_bytes(), doc_id)?;
