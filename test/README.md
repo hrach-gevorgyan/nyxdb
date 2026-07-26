@@ -9,6 +9,8 @@
   `feed=continuous` subscribers. Caught a real bug once (see
   `doc/changelog.md`).
 - `benchmark/` — speed/size/memory comparison against real CouchDB.
+- `ported/` — test cases ported from PouchDB's own test suite
+  (conflict resolution, idempotent replay, edge-case doc ids).
 
 Rust unit tests live in `db/src/*.rs` (`#[cfg(test)]`), not here.
 
@@ -32,4 +34,7 @@ node test/load/run.js
 
 # Benchmark vs. real CouchDB
 COUCH_USER=admin COUCH_PASSWORD=yourpass node test/benchmark/vs_couchdb.js
+
+# Ported PouchDB test cases
+node test/ported/pouchdb_tests.js
 ```

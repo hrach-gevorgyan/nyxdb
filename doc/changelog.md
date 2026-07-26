@@ -94,3 +94,21 @@
 **Current state**: ~4.2MB install (~54x smaller than CouchDB), ~7.5x
 faster writes, ~1.09x faster reads, 2-3x lighter memory, ~1.29x more
 disk per document. Full numbers in `BENCHMARKS.md`.
+
+**Ported real test cases from PouchDB's own test suite** instead of
+relying only on our own hand-written cases:
+- 5 winner-picking scenarios from `test.conflicts.js` ("Conflict
+  resolution 1-5"), added as unit tests in `db/src/revtree.rs`. All
+  passed immediately, including the one that specifically checks
+  generation compares numerically, not as a string (`"10-a"` beats
+  `"2-b"` — as plain strings `"10-a"` sorts first, which would be wrong).
+- 4 HTTP-level cases in `test/ported/pouchdb_tests.js`: idempotent
+  replay of the same `new_edits:false` push, deletion with full
+  revision history, a doc id that collides with a JS prototype method
+  name (`"constructor"`), and an empty `_revs_diff` request. All pass.
+- Explicitly did not port PouchDB tests for features this server
+  doesn't implement (optimistic concurrency on plain `PUT`, `revs_limit`,
+  `open_revs=all`) — those are documented, deliberate gaps
+  (`USAGE.md` §7), not bugs to fix by copying a test.
+- Rewrote all documentation to be plainer and more direct — no content
+  lost, just less narrative padding.

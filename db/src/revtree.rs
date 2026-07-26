@@ -307,4 +307,76 @@ mod tests {
         tree.insert_revision_chain(&["2-bbb".to_string(), "1-aaa".to_string()], true, serde_json::json!({}));
         assert!(tree.nodes["2-bbb"].deleted);
     }
+
+    // Ported from PouchDB's own integration test suite
+    // (tests/integration/test.conflicts.js, "Conflict resolution 1-5"),
+    // which encodes real CouchDB winner-picking behavior. Kept as
+    // separate cases with the exact revision ids PouchDB uses, rather
+    // than folded into the tests above, so a future diff against the
+    // upstream suite stays easy to spot.
+
+    /// PouchDB: "Conflict resolution 1" — three same-generation leaves
+    /// with no deletions; highest hash wins lexicographically.
+    #[test]
+    fn pouchdb_conflict_resolution_1_same_generation_lexicographic_tiebreak() {
+        let mut tree = RevTree::default();
+        tree.nodes.insert("1-a".into(), node(None));
+        tree.nodes.insert("1-b".into(), node(None));
+        tree.nodes.insert("1-1".into(), node(None));
+        assert_eq!(tree.winner(), Some(&"1-b".to_string()));
+    }
+
+    /// PouchDB: "Conflict resolution 2" — higher generation wins even
+    /// with a lexicographically smaller hash.
+    #[test]
+    fn pouchdb_conflict_resolution_2_generation_beats_hash() {
+        let mut tree = RevTree::default();
+        tree.nodes.insert("2-a".into(), node(None));
+        tree.nodes.insert("1-b".into(), node(None));
+        assert_eq!(tree.winner(), Some(&"2-a".to_string()));
+    }
+
+    /// PouchDB: "Conflict resolution 3" — generation must compare as an
+    /// integer, not as a string: `"10-a"` sorts before `"2-b"` as text,
+    /// but generation 10 beats generation 2 numerically. This is the
+    /// specific bug class this test guards against.
+    #[test]
+    fn pouchdb_conflict_resolution_3_generation_compares_numerically_not_lexically() {
+        let mut tree = RevTree::default();
+        tree.nodes.insert("10-a".into(), node(None));
+        tree.nodes.insert("2-b".into(), node(None));
+        assert_eq!(tree.winner(), Some(&"10-a".to_string()));
+    }
+
+    /// PouchDB: "Conflict resolution 4" — a deleted branch (`1-a1` →
+    /// `2-a2` → `3-a3`, tombstoned) loses to a shorter but non-deleted
+    /// branch (`1-b1`), regardless of the deleted branch's higher
+    /// generation.
+    #[test]
+    fn pouchdb_conflict_resolution_4_deleted_branch_loses_to_shorter_live_branch() {
+        let mut tree = RevTree::default();
+        tree.nodes.insert("1-a1".into(), node(None));
+        tree.nodes.insert("2-a2".into(), node(Some("1-a1")));
+        let mut tombstone = node(Some("2-a2"));
+        tombstone.deleted = true;
+        tree.nodes.insert("3-a3".into(), tombstone);
+        tree.nodes.insert("1-b1".into(), node(None));
+        assert_eq!(tree.winner(), Some(&"1-b1".to_string()));
+    }
+
+    /// PouchDB: "Conflict resolution 5" — a single non-deleted leaf
+    /// (`2-a2`) wins over two other deleted leaves, even ones with
+    /// otherwise-competitive generation/hash.
+    #[test]
+    fn pouchdb_conflict_resolution_5_single_live_leaf_beats_deleted_leaves() {
+        let mut tree = RevTree::default();
+        tree.nodes.insert("2-a2".into(), node(None));
+        let mut deleted_b = node(None);
+        deleted_b.deleted = true;
+        tree.nodes.insert("1-b1".into(), deleted_b);
+        let mut deleted_c = node(None);
+        deleted_c.deleted = true;
+        tree.nodes.insert("1-c1".into(), deleted_c);
+        assert_eq!(tree.winner(), Some(&"2-a2".to_string()));
+    }
 }
