@@ -1,24 +1,19 @@
 # couchdb-clone
 
-A minimal, PouchDB-compatible sync server in Rust — implements only the
-CouchDB replication protocol surface a real PouchDB client uses.
+A minimal, PouchDB-compatible sync server written in Rust. It implements
+the subset of CouchDB's replication protocol that a real PouchDB client
+uses — not a full CouchDB replacement.
 
-**For how to run it, every endpoint with examples, config, benchmarks,
-and exactly where this differs from real CouchDB, see
-[doc/USAGE.md](doc/USAGE.md).** That's the reference doc — this README
-is just an index. For a direct speed/size comparison against real
-CouchDB, see [doc/BENCHMARKS.md](doc/BENCHMARKS.md).
-
-See [doc/roadmap.md](doc/roadmap.md) for current status (Phases 0–3
-complete) and [doc/changelog.md](doc/changelog.md) for design rationale
-behind individual decisions as they were made.
+- **[doc/USAGE.md](doc/USAGE.md)** — how to run it, every endpoint, config, and where it differs from real CouchDB. Start here.
+- **[doc/BENCHMARKS.md](doc/BENCHMARKS.md)** — speed, size, and memory vs. real CouchDB.
+- **[doc/roadmap.md](doc/roadmap.md)** — what's done, what's not.
+- **[doc/changelog.md](doc/changelog.md)** — history of what changed and why.
 
 ## Layout
-- `doc/` — [USAGE.md](doc/USAGE.md) (start here), changelog, roadmap,
-  open questions, maintenance notes.
-- `db/` — main codebase (Rust server, axum + sled).
-- `test/` — integration, load, and differential test harnesses.
-- `prod/` — Dockerfile and compose file for production deployment.
+- `doc/` — documentation, start with USAGE.md
+- `db/` — the Rust server (axum + sled)
+- `test/` — integration, load, and differential tests
+- `prod/` — Docker deployment files
 
 ## Quickstart
 
@@ -26,11 +21,11 @@ behind individual decisions as they were made.
 cargo run --manifest-path db/Cargo.toml
 ```
 
-Runs on `127.0.0.1:5984` by default (override with `COUCHDB_CLONE_ADDR`),
-storing data under `./data` (override with `COUCHDB_CLONE_DATA`). HTTP
-Basic auth is required on every request except `GET /` — see
-[doc/USAGE.md](doc/USAGE.md) for credentials setup and the full endpoint
-reference.
+Listens on `127.0.0.1:5984` by default, stores data under `./data`.
+Override with `COUCHDB_CLONE_ADDR` / `COUCHDB_CLONE_DATA`.
+
+HTTP Basic auth is required on every request except `GET /`. See
+[doc/USAGE.md](doc/USAGE.md) for credentials.
 
 ```bash
 cargo test --manifest-path db/Cargo.toml

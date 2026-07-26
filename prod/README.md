@@ -1,8 +1,7 @@
 # Production deployment
 
-Decisions here must be made explicitly per plan §7 — see
-[doc/open-questions.md](../doc/open-questions.md) for the ones still open
-(TLS, CORS, rate limiting).
+See [doc/open-questions.md](../doc/open-questions.md) for what's still
+undecided (TLS, CORS, rate limiting).
 
 ## Build & run
 
@@ -12,14 +11,12 @@ docker compose -f prod/docker-compose.yml up -d --build
 
 ## Auth
 
-HTTP Basic auth is required on every route except `GET /`. Credentials
-are random per-install: on first run, the server generates a username
-(`admin`) and password, writes them to `<data dir>/credentials.json`,
-and logs the username (not the password — read it from the file). Pin
-credentials explicitly instead via `COUCHDB_CLONE_USER`/
-`COUCHDB_CLONE_PASSWORD` env vars, which always take priority over the
-file. Either way, keep `credentials.json` out of version control (it's
-already in `.gitignore`) and treat it like any other secret.
+HTTP Basic auth is required on every route except `GET /`. On first
+run, the server generates a username (`admin`) and password, writes
+them to `<data dir>/credentials.json`, and logs the username only. Pin
+credentials instead via `COUCHDB_CLONE_USER`/`COUCHDB_CLONE_PASSWORD`.
+Keep `credentials.json` out of version control (already in
+`.gitignore`).
 
 ## Not yet handled here (fill in before real deployment)
 - TLS termination (reverse proxy, e.g. Caddy/nginx, or native TLS in-app)
