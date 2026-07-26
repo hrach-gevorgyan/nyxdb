@@ -1,6 +1,9 @@
 # Roadmap
 
-Phased plan, per [rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §8.
+Phased plan for building a minimal, PouchDB-compatible sync server —
+implementing only the CouchDB replication protocol surface a real
+PouchDB client uses, not a general CouchDB replacement. See
+[USAGE.md](USAGE.md) for what's actually implemented today.
 
 ## Phase 0 — Spike (done)
 - [x] `PUT /{db}`, `GET /{db}`

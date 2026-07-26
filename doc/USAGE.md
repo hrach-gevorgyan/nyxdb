@@ -20,8 +20,9 @@ A Rust server implementing the subset of CouchDB's HTTP replication
 protocol that a real PouchDB client (`db.sync()`, `db.replicate.to/from()`)
 actually uses. It is **not** a general CouchDB replacement — no Mango
 queries, no MapReduce views, no attachments, no clustering. See
-[rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) for the full
-design rationale and [roadmap.md](roadmap.md) for what's implemented.
+[roadmap.md](roadmap.md) for phase-by-phase status and
+[changelog.md](changelog.md) for the reasoning behind individual design
+decisions as they were made.
 
 **Status**: Phases 0–3 complete (spike, real revision trees, live
 replication, hardening). Verified three independent ways: a real PouchDB

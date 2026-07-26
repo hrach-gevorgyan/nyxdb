@@ -9,9 +9,9 @@ and exactly where this differs from real CouchDB, see
 is just an index. For a direct speed/size comparison against real
 CouchDB, see [doc/BENCHMARKS.md](doc/BENCHMARKS.md).
 
-See [rust-couchdb-clone-plan.md](rust-couchdb-clone-plan.md) for the full
-design rationale and [doc/roadmap.md](doc/roadmap.md) for current status
-(Phases 0–3 complete).
+See [doc/roadmap.md](doc/roadmap.md) for current status (Phases 0–3
+complete) and [doc/changelog.md](doc/changelog.md) for design rationale
+behind individual decisions as they were made.
 
 ## Layout
 - `doc/` — [USAGE.md](doc/USAGE.md) (start here), changelog, roadmap,

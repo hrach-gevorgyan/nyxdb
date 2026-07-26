@@ -10,9 +10,10 @@ purpose.
 - `doc/` — planning and process docs (this folder). Start with
   [USAGE.md](USAGE.md) for how to actually use the server.
 - `db/` — main codebase: the Rust server implementing the CouchDB
-  replication protocol subset (see `rust-couchdb-clone-plan.md` §3).
+  replication protocol subset (see `doc/USAGE.md` §4 for exactly which
+  endpoints).
 - `test/` — testing environment: unit/integration tests, differential
-  testing harness against real CouchDB (needs Docker), fuzz/property tests.
+  testing harness against a real CouchDB instance, load/benchmark tests.
 - `prod/` — production deployment: Dockerfile, prod config, compose files.
 
 ## Day-to-day
@@ -23,8 +24,9 @@ purpose.
 
 ## Before a release
 1. Run the fast test tier (unit + in-process integration).
-2. Run the slow tier: differential tests against real CouchDB (Docker),
-   fuzz/property tests, load test pass.
+2. Run the slow tier: differential tests against a real CouchDB instance
+   (`test/differential/`, any install works, not just Docker), load test
+   (`test/load/`), benchmark comparison (`test/benchmark/`).
 3. Review `doc/open-questions.md` for anything that must be resolved before
    this release's deployment target (e.g. TLS/CORS decisions for prod).
 4. Update `doc/changelog.md`.

@@ -155,8 +155,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   test/dev hygiene. Also gave `test/differential/run.js` a cleanup step
   it was missing since it was first written (it never deleted its own
   disposable databases on either server).
-- Evaluated an external optimization proposal (`suggestions.md`) by
-  actually testing each claim rather than taking it on faith. Found two
+- Evaluated an external optimization proposal (`suggestions.md`, not
+  kept in this repo — see below and `doc/BENCHMARKS.md` for what it
+  contained) by actually testing each claim rather than taking it on
+  faith. Found two
   of its five "current baseline" numbers were fabricated, not measured:
   idle memory claimed as ~15MB (actually ~30.8MB, measured via
   `Get-Process` working set/private bytes) and `_changes` latency

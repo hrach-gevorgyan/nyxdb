@@ -34,10 +34,9 @@ CouchDB's install breakdown (`test/benchmark` methodology, measured via
 | `data` | 2.9 MB |
 | everything else | ~0.5 MB |
 
-This is the number that motivated the whole project (see
-[rust-couchdb-clone-plan.md](../rust-couchdb-clone-plan.md) §1): a
-~230 MB Erlang runtime is a lot to vendor into an app just for optional
-sync, when a real client only ever calls ~10 HTTP endpoints.
+This is the number that motivated the whole project: a ~230 MB Erlang
+runtime is a lot to vendor into an app just for optional sync, when a
+real client only ever calls ~10 HTTP endpoints.
 
 **Caveat**: this compares "what you have to install" — it's not
 apples-to-apples on *capability*. CouchDB's 229 MB buys you full
@@ -128,7 +127,9 @@ Result: a further ~11% reduction (2.6MB → 2.31MB), closing the gap from
 1.5x to 1.33x.
 
 **A dead end worth reporting, not hiding**: `suggestions.md` (an
-external optimization proposal) suggested using a faster zstd
+external optimization proposal, not kept in this repo — its useful
+content is fully captured here and in `doc/changelog.md`) suggested
+using a faster zstd
 compression level to recover write throughput. Tested directly by
 making the level configurable (`COUCHDB_CLONE_COMPRESSION_LEVEL` env
 var) and measuring level 1 vs. the default — **write speed and disk
