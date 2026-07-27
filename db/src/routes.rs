@@ -197,15 +197,46 @@ async fn get_doc(
     Ok(Json(body))
 }
 
+#[derive(serde::Deserialize)]
+struct PutDocParams {
+    new_edits: Option<bool>,
+}
+
+/// `PUT /{db}/{id}` — two distinct write semantics, same as `_bulk_docs`
+/// (plan §3, §8), selected by `?new_edits=`:
+/// - default (absent/true): single-writer last-write-wins, the server
+///   mints the new rev on top of the current winner. Used by app-level
+///   writes.
+/// - `new_edits=false`: the client dictates the exact `_rev`/`_revisions`
+///   ancestry — must be inserted into the tree verbatim, creating a real
+///   conflict if it diverges from what's already there, exactly like
+///   `_bulk_docs` with `new_edits:false`. Before this fix, `PUT` ignored
+///   `?new_edits=` entirely and always took the last-write-wins path,
+///   silently discarding the client's `_rev` and never forking a
+///   conflict — see `doc/changelog.md`.
 async fn put_doc(
     State(state): State<AppState>,
     Path((db_name, id)): Path<(String, String)>,
+    Query(params): Query<PutDocParams>,
     Json(mut body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let feed = state.feeds.get_or_create(&db_name);
+
+    if params.new_edits == Some(false) {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("_id".to_string(), json!(id));
+        }
+        let rev = write_doc_new_edits_false(&db, &feed, &id, &body).map_err(|reason| match reason {
+            "missing _rev" => ApiError(StatusCode::BAD_REQUEST, "bad_request", "missing _rev"),
+            "invalid attachment data" => ApiError(StatusCode::BAD_REQUEST, "bad_request", "invalid attachment data"),
+            _ => internal_error(),
+        })?;
+        return Ok(Json(json!({"ok": true, "id": id, "rev": rev})));
+    }
+
     crate::attachments::extract_inline_attachments(&db, &mut body)
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "bad_request", "invalid attachment data"))?;
-    let feed = state.feeds.get_or_create(&db_name);
     let rev = write_doc(&db, &feed, &id, body).map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
 }
@@ -387,42 +418,56 @@ fn bulk_docs_new_edits_true(db: &Db, feed: &ChangeFeed, docs: &[Value]) -> Resul
 fn bulk_docs_new_edits_false(db: &Db, feed: &ChangeFeed, docs: &[Value]) -> Result<Json<Value>, ApiError> {
     let mut errors = Vec::new();
     for doc in docs {
-        let Some(id) = doc.get("_id").and_then(Value::as_str) else {
+        let Some(id) = doc.get("_id").and_then(Value::as_str).map(String::from) else {
             errors.push(json!({"error": "bad_request", "reason": "missing _id"}));
             continue;
         };
-        let Some(chain) = revision_chain(doc) else {
-            errors.push(json!({"id": id, "error": "bad_request", "reason": "missing _rev"}));
-            continue;
-        };
-        let deleted = doc.get("_deleted").and_then(Value::as_bool).unwrap_or(false);
-        let mut body = doc.clone();
-        if let Some(obj) = body.as_object_mut() {
-            obj.remove("_id");
-            obj.remove("_rev");
-            obj.remove("_revisions");
-            obj.remove("_deleted");
-        }
-        if let Err(_reason) = crate::attachments::extract_inline_attachments(db, &mut body) {
-            errors.push(json!({"id": id, "error": "bad_request", "reason": "invalid attachment data"}));
-            continue;
-        }
-
-        let write = || -> StorageResult<u64> {
-            let mut tree = db.get_tree(id)?.unwrap_or_default();
-            tree.insert_revision_chain(&chain, deleted, body);
-            db.put_tree(id, &tree)
-        };
-        match write() {
-            Ok(seq) => feed.publish(ChangeEvent { seq, doc_id: id.to_string() }),
-            Err(_) => errors.push(json!({
-                "id": id,
-                "error": "internal_error",
-                "reason": "failed to write document",
-            })),
+        if let Err(reason) = write_doc_new_edits_false(db, feed, &id, doc) {
+            let error = if reason == "failed to write document" { "internal_error" } else { "bad_request" };
+            errors.push(json!({"id": id, "error": error, "reason": reason}));
         }
     }
     Ok(Json(Value::Array(errors)))
+}
+
+/// Shared by `_bulk_docs` (`new_edits:false`) and single-doc `PUT
+/// ?new_edits=false`: inserts the client-dictated `_rev`/`_revisions`
+/// chain into the document's revision tree verbatim, exactly as real
+/// replication does — this is what makes a diverging push create a
+/// genuine conflict instead of silently overwriting. Never mints a new
+/// revision itself; the caller supplies the exact one to store.
+fn write_doc_new_edits_false(
+    db: &Db,
+    feed: &ChangeFeed,
+    id: &str,
+    doc: &Value,
+) -> Result<String, &'static str> {
+    let Some(chain) = revision_chain(doc) else {
+        return Err("missing _rev");
+    };
+    let rev = chain[0].clone();
+    let deleted = doc.get("_deleted").and_then(Value::as_bool).unwrap_or(false);
+    let mut body = doc.clone();
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("_id");
+        obj.remove("_rev");
+        obj.remove("_revisions");
+        obj.remove("_deleted");
+    }
+    crate::attachments::extract_inline_attachments(db, &mut body).map_err(|_| "invalid attachment data")?;
+
+    let write = || -> StorageResult<u64> {
+        let mut tree = db.get_tree(id)?.unwrap_or_default();
+        tree.insert_revision_chain(&chain, deleted, body);
+        db.put_tree(id, &tree)
+    };
+    match write() {
+        Ok(seq) => {
+            feed.publish(ChangeEvent { seq, doc_id: id.to_string() });
+            Ok(rev)
+        }
+        Err(_) => Err("failed to write document"),
+    }
 }
 
 /// Resolves a doc's revision id + ancestry (as `new_edits:false` sends

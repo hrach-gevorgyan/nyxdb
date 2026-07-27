@@ -5,6 +5,33 @@
 > `COUCHDB_CLONE_*` env var prefix (now `NYXDB_*`) — left as an honest
 > historical record rather than rewritten.
 
+## v0.1.3
+
+**Real bug found live-testing against a real PouchDB app** (Offlog):
+a single `PUT /{db}/{id}?new_edits=false` with an explicit `_rev` at a
+generation that already exists silently applied as a normal edit
+instead of forking a real conflict — `put_doc` ignored `?new_edits=`
+entirely and always took the last-write-wins path, discarding the
+client-supplied `_rev`. The equivalent operation via `_bulk_docs` with
+`new_edits:false` already worked correctly, which is what made this a
+routing bug in `db/src/routes.rs`, not a rev-tree bug — the underlying
+conflict/winner-picking logic (already covered by the
+`pouchdb_conflict_resolution_*` unit tests and the differential test)
+was never wrong.
+
+Fixed by having `put_doc` branch on `?new_edits=` the same way
+`_bulk_docs` already does, and extracting the shared tree-insertion
+logic (`write_doc_new_edits_false`) so both paths use the exact same
+code instead of two implementations that could drift apart again.
+Verified against real CouchDB 3.5.2 directly (not just our own
+expectations) that a diverging single-PUT `new_edits=false` creates a
+genuine sibling conflict there too — this server now matches. Added a
+regression test (`test/ported/pouchdb_tests.js`) that fails against
+the old code and passes against the fix, confirmed both ways before
+merging. Full existing suite (19 unit tests, both PouchDB integration
+tests, ported cases, attachments, load, differential vs. real
+CouchDB) still passes.
+
 ## [Unreleased]
 
 **Phase 0 — spike**

@@ -107,9 +107,11 @@ Not implemented: `?revs=true`, `?open_revs=...`, `?rev=<specific>` (use
 `_bulk_get` instead — it supports fetching a specific `rev`).
 
 ### `PUT /{db}/{id}`
-Write a document. Always creates a new revision on top of the current
-winner (last-write-wins). This is the app-write path, not the
-replication path — see `_bulk_docs` with `new_edits:false` below.
+Two modes, same as `_bulk_docs`, selected by `?new_edits=`:
+
+**Default** (`new_edits` absent or `true`) — the app-write path.
+Always creates a new revision on top of the current winner
+(last-write-wins), not the replication path:
 
 ```bash
 curl -u user:pass -X PUT http://127.0.0.1:5984/mydb/doc1 \
@@ -118,8 +120,22 @@ curl -u user:pass -X PUT http://127.0.0.1:5984/mydb/doc1 \
 ```
 
 No optimistic concurrency control here — a `PUT` always succeeds even
-if you didn't send the current `_rev`. Use `new_edits:false` if you
+if you didn't send the current `_rev`. Use `new_edits=false` if you
 need real conflict detection.
+
+**`?new_edits=false`** — the single-document form of the replication
+push format. You supply the exact `_rev` (and optionally
+`_revisions` for full ancestry); the server stores it as-is, creating
+a real conflict if it diverges from what's already there — same
+semantics as `_bulk_docs` with `new_edits:false`, just for one
+document instead of a batch:
+
+```bash
+curl -u user:pass -X PUT "http://127.0.0.1:5984/mydb/doc1?new_edits=false" \
+  -H "Content-Type: application/json" \
+  -d '{"_id":"doc1","_rev":"3-ccc","_revisions":{"start":3,"ids":["ccc","bbb","aaa"]},"foo":"bar"}'
+# {"ok":true,"id":"doc1","rev":"3-ccc"}
+```
 
 ### Attachments
 

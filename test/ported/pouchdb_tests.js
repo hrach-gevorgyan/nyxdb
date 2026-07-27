@@ -154,11 +154,52 @@ async function testRevsDiffEmptyArray() {
   await deleteDb(db);
 }
 
+// Real bug found live-testing against a real PouchDB app (see
+// doc/changelog.md): a single `PUT /{db}/{id}?new_edits=false` with an
+// explicit `_rev` at a generation that already exists silently applied
+// as a normal edit instead of forking a real conflict — the handler
+// ignored `?new_edits=` entirely. The equivalent operation via
+// `_bulk_docs` already worked correctly (covered by the tests above),
+// which is what made this a routing bug, not a rev-tree bug. Verified
+// against real CouchDB 3.5.2 to match this exact behavior before
+// fixing (see the differential test for the general case; this pins
+// the single-PUT path specifically, which the differential test
+// doesn't exercise).
+async function testSinglePutNewEditsFalseCreatesConflict() {
+  const db = "ported_put_new_edits_false_" + Date.now();
+  await createDb(db);
+
+  const created = await req(db, "PUT", "/doc1", { title: "original" });
+  const originalRev = created.body.rev;
+
+  const forked = await req(db, "PUT", "/doc1?new_edits=false", {
+    _id: "doc1",
+    _rev: "1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    title: "different content",
+  });
+  check(
+    "single PUT ?new_edits=false stores the client-supplied rev verbatim",
+    forked.status === 200 && forked.body.rev === "1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    JSON.stringify(forked.body)
+  );
+
+  const final = await req(db, "GET", "/doc1?conflicts=true");
+  const conflicts = final.body._conflicts || [];
+  check(
+    "single PUT ?new_edits=false forks a real conflict, not a silent overwrite",
+    conflicts.length === 1 && (conflicts[0] === originalRev || conflicts[0] === "1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    `original=${originalRev} conflicts=${JSON.stringify(conflicts)} winner=${final.body._rev}`
+  );
+
+  await deleteDb(db);
+}
+
 async function main() {
   await testSuccessiveNewEditsIdempotent();
   await testDeletionWithFullHistory();
   await testReservedIdDocument();
   await testRevsDiffEmptyArray();
+  await testSinglePutNewEditsFalseCreatesConflict();
 
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);
