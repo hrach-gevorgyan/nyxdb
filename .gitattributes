@@ -1,0 +1,9 @@
+# Normalize line endings to LF in the repo; let git handle CRLF conversion
+# on checkout for anyone using core.autocrlf=true on Windows. Stops the
+# "LF will be replaced by CRLF" warnings on every commit.
+* text=auto eol=lf
+
+# Binary files: never touch line endings, never diff as text.
+*.png binary
+*.jpg binary
+*.ico binary
