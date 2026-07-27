@@ -4,7 +4,7 @@
 
 use crate::changes::{ChangeEvent, ChangeFeed, ChangeFeedRegistry};
 use crate::revtree::RevNode;
-use crate::storage::Db;
+use crate::storage::{Db, StorageResult};
 use axum::{
     body::{to_bytes, Body, Bytes},
     extract::{Path, Query, Request, State},
@@ -303,7 +303,7 @@ fn bulk_docs_new_edits_false(db: &Db, feed: &ChangeFeed, docs: &[Value]) -> Resu
             obj.remove("_deleted");
         }
 
-        let write = || -> sled::Result<u64> {
+        let write = || -> StorageResult<u64> {
             let mut tree = db.get_tree(id)?.unwrap_or_default();
             tree.insert_revision_chain(&chain, deleted, body);
             db.put_tree(id, &tree)
@@ -397,7 +397,7 @@ async fn bulk_get(
         };
         let requested_rev = req.get("rev").and_then(Value::as_str);
 
-        let doc_result = (|| -> sled::Result<Value> {
+        let doc_result = (|| -> StorageResult<Value> {
             let Some(tree) = db.get_tree(id)? else {
                 return Ok(json!({"error": {"id": id, "error": "not_found", "reason": "missing"}}));
             };
@@ -428,7 +428,7 @@ async fn bulk_get(
     Ok(Json(json!({"results": results})))
 }
 
-fn write_doc(db: &Db, feed: &ChangeFeed, id: &str, body: Value) -> sled::Result<String> {
+fn write_doc(db: &Db, feed: &ChangeFeed, id: &str, body: Value) -> StorageResult<String> {
     let mut tree = db.get_tree(id)?.unwrap_or_default();
     let parent = tree.winner().cloned();
     let gen = parent

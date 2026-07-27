@@ -69,24 +69,23 @@ Phase 4.
    `PermissionsExt::from_mode`) is standard; worth a quick check on an
    actual Linux box before relying on it.
 
-### Risky — real problems, deferred (need more care than a quick fix)
-1. **No request body size limit.** A client can send an arbitrarily
+### Risky — fixed in a follow-up pass, same session
+1. **No request body size limit.** A client could send an arbitrarily
    large body, or an unbounded `_bulk_docs` batch, fully buffered into
-   memory before parsing. Real memory-exhaustion vector. Not fixed
-   this session because the right limit is a judgment call (default
-   too low breaks legitimate large syncs; too high doesn't help) —
-   logged in `open-questions.md`.
-2. **Panics on corrupted on-disk data.** `storage.rs` uses `.expect()`
-   when deserializing stored documents and sequence-log entries. If
-   the data directory is ever corrupted (disk failure, manual
-   tampering, a future storage-format change without a migration
-   path), a read panics per-request instead of failing with a clean
-   500. Tokio isolates the panic to that one request rather than
-   crashing the server, but it's still an ungracious failure mode.
-   Not fixed this session — converting every one of these to a proper
-   `Result` chain touches the core read path and deserves its own
-   focused pass with full regression testing, not a rushed edit
-   alongside everything else here.
+   memory before parsing. Fixed with `axum::extract::DefaultBodyLimit`,
+   defaulting to 50MB (generous for a large sync batch, not unbounded),
+   configurable via `COUCHDB_CLONE_MAX_BODY_BYTES`. Verified: an
+   oversized body gets `413` with a proper JSON error (via the
+   normalize-error-body fix above); normal requests are unaffected.
+2. **Panics on corrupted on-disk data.** `storage.rs` used `.expect()`
+   deserializing stored documents and sequence-log entries — a
+   corrupted data directory would panic the request instead of
+   returning a clean 500. Converted every one of these to a proper
+   `StorageError`/`StorageResult` chain (`db/src/storage.rs`) instead
+   of panicking. Verified: full regression suite (19 unit tests, both
+   PouchDB integration tests, differential test, ported tests) still
+   passes — this was a pure error-handling refactor, no behavior change
+   on the non-corrupted path.
 
 ### Review — needs a decision, not urgent
 - **No rate limiting or lockout on repeated failed auth attempts.**
@@ -105,7 +104,8 @@ Phase 4.
 
 ## What changed this session
 
-See `changelog.md` for the actual commits. Summary: fixed the three
-"risky, fixed" items above. Left the two "risky, deferred" items and
-all "review" items as documented, deliberate gaps — not fixed in a
-rush, not forgotten either.
+See `changelog.md` for the actual commits. Summary: fixed all five
+"risky" items above (three immediately, two in a careful follow-up
+pass with full regression testing each time). Left the "review" items
+as documented, deliberate gaps — not fixed in a rush, not forgotten
+either.

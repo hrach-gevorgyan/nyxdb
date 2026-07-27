@@ -60,7 +60,19 @@ async fn main() {
         data_dir
     );
 
-    let mut app = build_router(AppState { root, feeds: ChangeFeedRegistry::default(), creds: Arc::new(creds) });
+    // Unbounded request bodies are a real memory-exhaustion vector (see
+    // doc/AUDIT.md) — axum buffers the whole body before a Json
+    // extractor ever runs. Default is generous enough for a large
+    // _bulk_docs sync batch without being effectively unlimited;
+    // override via COUCHDB_CLONE_MAX_BODY_BYTES if a deployment needs
+    // something different.
+    let max_body_bytes: usize = std::env::var("COUCHDB_CLONE_MAX_BODY_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50 * 1024 * 1024);
+
+    let mut app = build_router(AppState { root, feeds: ChangeFeedRegistry::default(), creds: Arc::new(creds) })
+        .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes));
     // CORS must wrap auth (outermost), not the other way round: tower_http's
     // CorsLayer answers OPTIONS preflight requests itself, and a preflight
     // never carries credentials — if auth ran first, every preflight would

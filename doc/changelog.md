@@ -139,3 +139,12 @@ relying only on our own hand-written cases:
   Verified no regression: 19 unit tests, both PouchDB integration
   tests, the load test, the differential test against real CouchDB,
   and all ported PouchDB test cases still pass.
+- Closed the two deferred audit findings with proper fixes instead of
+  leaving them open: added `axum::extract::DefaultBodyLimit` (50MB
+  default, `COUCHDB_CLONE_MAX_BODY_BYTES` to override) so an oversized
+  request gets a clean `413` instead of unbounded memory buffering.
+  Converted every panic-on-corrupt-data path in `storage.rs` to a
+  proper `StorageError`/`StorageResult` chain instead of `.expect()`.
+  Verified: oversized bodies correctly rejected with a JSON error, full
+  regression suite (19 unit tests, integration, differential, load,
+  ported tests) still passes.

@@ -5,7 +5,42 @@
 use crate::revtree::{RevId, RevNode, RevTree};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
+
+/// Reads can fail two genuinely different ways: sled itself erroring
+/// (disk I/O, etc. — already a `Result` from sled), or the bytes we get
+/// back not decoding into what we expect. The second case used to be a
+/// `.expect()` that panicked the request instead of failing gracefully
+/// — found in the project audit (`doc/AUDIT.md`). A panic here doesn't
+/// crash the whole server (tokio isolates it to one request), but it's
+/// still an ungracious failure for something that should just be a
+/// clean 500: a corrupted data directory, a manual edit, or (in the
+/// future) a storage-format change without a migration path.
+#[derive(Debug)]
+pub enum StorageError {
+    Sled(sled::Error),
+    Corrupt(String),
+}
+
+impl fmt::Display for StorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StorageError::Sled(e) => write!(f, "storage error: {e}"),
+            StorageError::Corrupt(msg) => write!(f, "corrupt stored data: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for StorageError {}
+
+impl From<sled::Error> for StorageError {
+    fn from(e: sled::Error) -> Self {
+        StorageError::Sled(e)
+    }
+}
+
+pub type StorageResult<T> = Result<T, StorageError>;
 
 /// `bincode::serialize`/`deserialize` (the top-level convenience
 /// functions) use fixed-width 8-byte integers and 8-byte length
@@ -42,17 +77,19 @@ struct StoredTree {
     nodes: Vec<(RevId, StoredNode)>,
 }
 
-impl From<&RevTree> for StoredTree {
-    fn from(tree: &RevTree) -> Self {
+impl TryFrom<&RevTree> for StoredTree {
+    type Error = serde_json::Error;
+
+    fn try_from(tree: &RevTree) -> Result<Self, Self::Error> {
         let nodes = tree
             .nodes
             .iter()
             .map(|(rev, node)| {
-                let body = serde_json::to_vec(&node.body).expect("doc body must serialize");
-                (rev.clone(), StoredNode { parent: node.parent.clone(), deleted: node.deleted, body })
+                let body = serde_json::to_vec(&node.body)?;
+                Ok((rev.clone(), StoredNode { parent: node.parent.clone(), deleted: node.deleted, body }))
             })
-            .collect();
-        StoredTree { nodes }
+            .collect::<Result<_, serde_json::Error>>()?;
+        Ok(StoredTree { nodes })
     }
 }
 
@@ -98,15 +135,22 @@ impl Db {
         })
     }
 
-    pub fn get_tree(&self, doc_id: &str) -> sled::Result<Option<RevTree>> {
+    pub fn get_tree(&self, doc_id: &str) -> StorageResult<Option<RevTree>> {
         let Some(bytes) = self.docs.get(doc_id)? else { return Ok(None) };
-        let stored: StoredTree = bincode_options().deserialize(&bytes).expect("corrupt revtree in storage");
-        Ok(Some(RevTree::try_from(stored).expect("corrupt doc body JSON in storage")))
+        let stored: StoredTree = bincode_options()
+            .deserialize(&bytes)
+            .map_err(|e| StorageError::Corrupt(format!("revtree for {doc_id:?}: {e}")))?;
+        let tree = RevTree::try_from(stored)
+            .map_err(|e| StorageError::Corrupt(format!("doc body JSON for {doc_id:?}: {e}")))?;
+        Ok(Some(tree))
     }
 
-    pub fn put_tree(&self, doc_id: &str, tree: &RevTree) -> sled::Result<u64> {
-        let stored = StoredTree::from(tree);
-        let bytes = bincode_options().serialize(&stored).expect("revtree must serialize");
+    pub fn put_tree(&self, doc_id: &str, tree: &RevTree) -> StorageResult<u64> {
+        let stored = StoredTree::try_from(tree)
+            .map_err(|e| StorageError::Corrupt(format!("failed to encode doc body for {doc_id:?}: {e}")))?;
+        let bytes = bincode_options()
+            .serialize(&stored)
+            .map_err(|e| StorageError::Corrupt(format!("failed to encode revtree for {doc_id:?}: {e}")))?;
         self.docs.insert(doc_id, bytes)?;
         let seq = self.base.generate_id()?;
         self.seq_log.insert(seq.to_be_bytes(), doc_id)?;
@@ -122,14 +166,19 @@ impl Db {
     /// database, so a given db's sequence numbers can have gaps where
     /// another db's writes landed — that's fine, callers only need
     /// "monotonically increasing for this db," not "contiguous."
-    pub fn changes_since(&self, since: u64) -> sled::Result<Vec<(u64, String)>> {
+    pub fn changes_since(&self, since: u64) -> StorageResult<Vec<(u64, String)>> {
         let start = (since + 1).to_be_bytes();
         self.seq_log
             .range(start..)
             .map(|entry| {
                 let (seq_bytes, doc_id_bytes) = entry?;
-                let seq = u64::from_be_bytes(seq_bytes.as_ref().try_into().unwrap());
-                let doc_id = String::from_utf8(doc_id_bytes.to_vec()).expect("doc id must be utf8");
+                let seq_array: [u8; 8] = seq_bytes
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| StorageError::Corrupt(format!("seq_log key is not 8 bytes: {seq_bytes:?}")))?;
+                let seq = u64::from_be_bytes(seq_array);
+                let doc_id = String::from_utf8(doc_id_bytes.to_vec())
+                    .map_err(|e| StorageError::Corrupt(format!("seq_log value is not valid UTF-8: {e}")))?;
                 Ok((seq, doc_id))
             })
             .collect()
@@ -138,15 +187,13 @@ impl Db {
     /// Highest seq this db has assigned, read directly off `seq_log`'s
     /// last key rather than a separately maintained counter — one less
     /// piece of state that could drift out of sync with reality.
-    pub fn current_seq(&self) -> sled::Result<u64> {
-        Ok(self
-            .seq_log
-            .iter()
-            .keys()
-            .next_back()
-            .transpose()?
-            .map(|k| u64::from_be_bytes(k.as_ref().try_into().unwrap()))
-            .unwrap_or(0))
+    pub fn current_seq(&self) -> StorageResult<u64> {
+        let Some(key) = self.seq_log.iter().keys().next_back().transpose()? else {
+            return Ok(0);
+        };
+        let array: [u8; 8] =
+            key.as_ref().try_into().map_err(|_| StorageError::Corrupt(format!("seq_log key is not 8 bytes: {key:?}")))?;
+        Ok(u64::from_be_bytes(array))
     }
 }
 
