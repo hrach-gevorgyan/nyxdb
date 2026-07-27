@@ -7,7 +7,7 @@
 // concurrent continuous subscriber actually receives every change.
 //
 // Expects the server running at SERVER_URL (default http://127.0.0.1:8085)
-// with COUCHDB_CLONE_USER/COUCHDB_CLONE_PASSWORD matching TEST_USER/TEST_PASSWORD.
+// with NYXDB_USER/NYXDB_PASSWORD matching TEST_USER/TEST_PASSWORD.
 
 const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
 const TEST_USER = process.env.TEST_USER || "testuser";
@@ -25,9 +25,9 @@ function fail(msg) {
 async function reportServerMemory(label) {
   try {
     const { execSync } = require("child_process");
-    const out = execSync('tasklist /FI "IMAGENAME eq couchdb-clone.exe" /FO CSV /NH').toString();
+    const out = execSync('tasklist /FI "IMAGENAME eq nyxdb.exe" /FO CSV /NH').toString();
     const line = out.trim().split("\n")[0];
-    if (line && line.includes("couchdb-clone.exe")) {
+    if (line && line.includes("nyxdb.exe")) {
       const mem = line.split(",")[4]?.replace(/"/g, "");
       console.log(`  server memory (${label}): ${mem}`);
     }

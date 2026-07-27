@@ -12,15 +12,15 @@ All resolved. Kept as a record of the decision and reasoning, since
       than building TLS into the server itself — keeps this project's
       scope to the replication protocol, not transport security.
 - [x] **CORS** — off by default, opt-in per-origin via
-      `COUCHDB_CLONE_CORS_ORIGINS`, no wildcard. `db/src/main.rs::cors_layer`.
+      `NYXDB_CORS_ORIGINS`, no wildcard. `db/src/main.rs::cors_layer`.
 - [x] **Rate limiting** on `_bulk_docs` — resolved: not needed for the
       trusted-LAN deployment model above. Revisit if this is ever
       exposed beyond a trusted network.
 - [x] **Credentials** — random per-install, or pinned via
-      `COUCHDB_CLONE_USER`/`COUCHDB_CLONE_PASSWORD`. Required on every
+      `NYXDB_USER`/`NYXDB_PASSWORD`. Required on every
       route except `GET /`. `db/src/auth.rs`.
 - [x] **Request body size limit** — `DefaultBodyLimit`, 50MB default,
-      override via `COUCHDB_CLONE_MAX_BODY_BYTES`.
+      override via `NYXDB_MAX_BODY_BYTES`.
 - [x] **Cap on concurrent `feed=continuous` connections** — resolved:
       not needed for the trusted-LAN deployment model. Verified correct
       (not just fast) up to 80 concurrent in load testing.

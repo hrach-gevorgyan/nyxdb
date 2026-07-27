@@ -1,6 +1,6 @@
-use couchdb_clone::auth::Credentials;
-use couchdb_clone::changes::ChangeFeedRegistry;
-use couchdb_clone::routes::{build_router, AppState};
+use nyxdb::auth::Credentials;
+use nyxdb::changes::ChangeFeedRegistry;
+use nyxdb::routes::{build_router, AppState};
 use std::path::Path;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -11,10 +11,10 @@ use tower_http::normalize_path::NormalizePathLayer;
 /// surface once the server is reachable beyond a trusted LAN. Default
 /// is no CORS layer at all (same-origin only; doesn't affect non-browser
 /// clients like PouchDB in Node, which isn't subject to CORS). Set
-/// `COUCHDB_CLONE_CORS_ORIGINS` to a comma-separated allowlist (e.g. a
+/// `NYXDB_CORS_ORIGINS` to a comma-separated allowlist (e.g. a
 /// specific WebView origin) to enable it for a browser-based client.
 fn cors_layer() -> Option<CorsLayer> {
-    let origins = std::env::var("COUCHDB_CLONE_CORS_ORIGINS").ok()?;
+    let origins = std::env::var("NYXDB_CORS_ORIGINS").ok()?;
     let parsed: Vec<axum::http::HeaderValue> = origins
         .split(',')
         .map(str::trim)
@@ -44,26 +44,26 @@ fn cors_layer() -> Option<CorsLayer> {
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let data_dir = std::env::var("COUCHDB_CLONE_DATA").unwrap_or_else(|_| "./data".into());
+    let data_dir = std::env::var("NYXDB_DATA").unwrap_or_else(|_| "./data".into());
     // zstd compression is off by default in sled; JSON document bodies
     // compress well, and enabling it was one of two changes (the other
     // being storage.rs's use of generate_id() instead of a hand-rolled
     // counter write) that closed most of the on-disk-size gap found in
     // doc/BENCHMARKS.md. Level defaults to sled's own default (5);
-    // override via COUCHDB_CLONE_COMPRESSION_LEVEL (1-22, lower = faster
+    // override via NYXDB_COMPRESSION_LEVEL (1-22, lower = faster
     // but less compression) — exposed as an env var specifically to A/B
     // this trade-off without rebuilding, per doc/BENCHMARKS.md's
     // speed-vs-size experiment.
     let mut config = sled::Config::new().path(&data_dir).use_compression(true);
-    if let Ok(level) = std::env::var("COUCHDB_CLONE_COMPRESSION_LEVEL") {
-        let level: i32 = level.parse().expect("COUCHDB_CLONE_COMPRESSION_LEVEL must be an integer 1-22");
+    if let Ok(level) = std::env::var("NYXDB_COMPRESSION_LEVEL") {
+        let level: i32 = level.parse().expect("NYXDB_COMPRESSION_LEVEL must be an integer 1-22");
         config = config.compression_factor(level);
     }
     let root = Arc::new(config.open().expect("failed to open sled database"));
 
     let creds = Credentials::load_or_generate(Path::new(&data_dir)).expect("failed to load/generate credentials");
     tracing::info!(
-        "HTTP Basic auth required for all requests except GET / — username: {}, password: see {}/credentials.json (or COUCHDB_CLONE_USER/COUCHDB_CLONE_PASSWORD)",
+        "HTTP Basic auth required for all requests except GET / — username: {}, password: see {}/credentials.json (or NYXDB_USER/NYXDB_PASSWORD)",
         creds.username,
         data_dir
     );
@@ -72,9 +72,9 @@ async fn main() {
     // doc/AUDIT.md) — axum buffers the whole body before a Json
     // extractor ever runs. Default is generous enough for a large
     // _bulk_docs sync batch without being effectively unlimited;
-    // override via COUCHDB_CLONE_MAX_BODY_BYTES if a deployment needs
+    // override via NYXDB_MAX_BODY_BYTES if a deployment needs
     // something different.
-    let max_body_bytes: usize = std::env::var("COUCHDB_CLONE_MAX_BODY_BYTES")
+    let max_body_bytes: usize = std::env::var("NYXDB_MAX_BODY_BYTES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(50 * 1024 * 1024);
@@ -86,10 +86,10 @@ async fn main() {
     // never carries credentials — if auth ran first, every preflight would
     // 401 before CORS got a chance to respond.
     if let Some(cors) = cors_layer() {
-        tracing::info!("CORS enabled: COUCHDB_CLONE_CORS_ORIGINS = {}", std::env::var("COUCHDB_CLONE_CORS_ORIGINS").unwrap());
+        tracing::info!("CORS enabled: NYXDB_CORS_ORIGINS = {}", std::env::var("NYXDB_CORS_ORIGINS").unwrap());
         app = app.layer(cors);
     } else {
-        tracing::info!("CORS disabled (same-origin only) — set COUCHDB_CLONE_CORS_ORIGINS to enable for a browser client");
+        tracing::info!("CORS disabled (same-origin only) — set NYXDB_CORS_ORIGINS to enable for a browser client");
     }
     // PouchDB's http adapter requests db/doc URLs with a trailing slash
     // (e.g. `GET /{db}/`); trim it so those still match our routes.
@@ -98,7 +98,7 @@ async fn main() {
         .service(app);
     let app = tower::make::Shared::new(app);
 
-    let addr = std::env::var("COUCHDB_CLONE_ADDR").unwrap_or_else(|_| "127.0.0.1:5984".into());
+    let addr = std::env::var("NYXDB_ADDR").unwrap_or_else(|_| "127.0.0.1:5984".into());
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("failed to bind address");
     tracing::info!("listening on {addr}");
     axum::serve(listener, app).await.expect("server error");

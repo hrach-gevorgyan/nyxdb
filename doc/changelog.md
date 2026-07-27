@@ -1,5 +1,10 @@
 # Changelog
 
+> Renamed from "couchdb-clone" to **NyxDB**. Entries below predate the
+> rename and refer to the project by its old working name and old
+> `COUCHDB_CLONE_*` env var prefix (now `NYXDB_*`) — left as an honest
+> historical record rather than rewritten.
+
 ## [Unreleased]
 
 **Phase 0 — spike**

@@ -1,5 +1,4 @@
 //! Per-document revision tree: storage, winner-picking, `_revs_diff`.
-//! See rust-couchdb-clone-plan.md §4.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

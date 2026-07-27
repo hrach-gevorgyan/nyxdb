@@ -30,7 +30,7 @@ node test/integration/live_sync.js
 COUCH_USER=admin COUCH_PASSWORD=yourpass node test/differential/run.js
 
 # Load/soak: run against a --release build for meaningful numbers.
-# Server needs COUCHDB_CLONE_USER/PASSWORD matching TEST_USER/PASSWORD
+# Server needs NYXDB_USER/PASSWORD matching TEST_USER/PASSWORD
 # (default: testuser/testpass). Scale with LOAD_BULK_SIZE/LOAD_SUBSCRIBERS.
 node test/load/run.js
 

@@ -74,7 +74,7 @@ Phase 4.
    large body, or an unbounded `_bulk_docs` batch, fully buffered into
    memory before parsing. Fixed with `axum::extract::DefaultBodyLimit`,
    defaulting to 50MB (generous for a large sync batch, not unbounded),
-   configurable via `COUCHDB_CLONE_MAX_BODY_BYTES`. Verified: an
+   configurable via `NYXDB_MAX_BODY_BYTES`. Verified: an
    oversized body gets `413` with a proper JSON error (via the
    normalize-error-body fix above); normal requests are unaffected.
 2. **Panics on corrupted on-disk data.** `storage.rs` used `.expect()`

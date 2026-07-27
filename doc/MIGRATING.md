@@ -52,7 +52,7 @@ docker compose -f prod/docker-compose.yml up -d --build
 
 Note the generated admin username from the startup log, and read the
 password from `<data dir>/credentials.json` — or pin both explicitly
-with `COUCHDB_CLONE_USER`/`COUCHDB_CLONE_PASSWORD` (recommended for a
+with `NYXDB_USER`/`NYXDB_PASSWORD` (recommended for a
 real deployment, so you're not hunting for a generated file later).
 
 Confirm it's reachable:

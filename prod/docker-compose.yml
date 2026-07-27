@@ -1,13 +1,13 @@
 services:
-  couchdb-clone:
+  nyxdb:
     build:
       context: ..
       dockerfile: prod/Dockerfile
     ports:
       - "5984:5984"
     volumes:
-      - couchdb-clone-data:/data
+      - nyxdb-data:/data
     restart: unless-stopped
 
 volumes:
-  couchdb-clone-data:
+  nyxdb-data:

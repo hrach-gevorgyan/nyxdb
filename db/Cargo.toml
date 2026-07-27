@@ -1,5 +1,6 @@
 [package]
-name = "couchdb-clone"
+name = "nyxdb"
+description = "NyxDB — a from-scratch reimplementation of CouchDB's replication protocol in Rust"
 version = "0.1.0"
 edition = "2021"
 

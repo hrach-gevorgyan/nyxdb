@@ -1,5 +1,5 @@
 {
-  "name": "couchdb-clone-attachment-tests",
+  "name": "nyxdb-attachment-tests",
   "private": true,
   "version": "0.1.0",
   "dependencies": {

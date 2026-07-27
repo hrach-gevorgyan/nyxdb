@@ -33,14 +33,14 @@ impl fmt::Debug for Credentials {
 }
 
 impl Credentials {
-    /// `COUCHDB_CLONE_USER`/`COUCHDB_CLONE_PASSWORD` take priority (used
+    /// `NYXDB_USER`/`NYXDB_PASSWORD` take priority (used
     /// by tests, and by anyone who wants to pin credentials explicitly).
     /// Otherwise, load a previously generated credentials file, or
     /// generate one now — random per-install, not a shared default
     /// password, matching plan §7's baseline.
     pub fn load_or_generate(data_dir: &Path) -> std::io::Result<Self> {
         if let (Ok(username), Ok(password)) =
-            (std::env::var("COUCHDB_CLONE_USER"), std::env::var("COUCHDB_CLONE_PASSWORD"))
+            (std::env::var("NYXDB_USER"), std::env::var("NYXDB_PASSWORD"))
         {
             return Ok(Self { username, password });
         }
@@ -110,7 +110,7 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Basic realm=\"couchdb-clone\"")],
+        [(header::WWW_AUTHENTICATE, "Basic realm=\"nyxdb\"")],
         Json(json!({"error": "unauthorized", "reason": "Name or password is incorrect."})),
     )
         .into_response()

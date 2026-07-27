@@ -31,7 +31,7 @@ see §3.
 
 On first run it generates HTTP Basic auth credentials and logs the
 username (password is in `<data dir>/credentials.json`, or set
-`COUCHDB_CLONE_USER`/`COUCHDB_CLONE_PASSWORD` yourself). Every request
+`NYXDB_USER`/`NYXDB_PASSWORD` yourself). Every request
 needs auth except `GET /`.
 
 ```bash
@@ -43,11 +43,11 @@ curl -u admin:<password> -X PUT http://127.0.0.1:5984/mydb     # needs auth
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `COUCHDB_CLONE_ADDR` | `127.0.0.1:5984` | bind address |
-| `COUCHDB_CLONE_DATA` | `./data` | data directory (also holds `credentials.json`) |
-| `COUCHDB_CLONE_USER` | generated | admin username |
-| `COUCHDB_CLONE_PASSWORD` | generated | admin password (set together with the username above) |
-| `COUCHDB_CLONE_CORS_ORIGINS` | unset (CORS off) | comma-separated allowed origins, no wildcard |
+| `NYXDB_ADDR` | `127.0.0.1:5984` | bind address |
+| `NYXDB_DATA` | `./data` | data directory (also holds `credentials.json`) |
+| `NYXDB_USER` | generated | admin username |
+| `NYXDB_PASSWORD` | generated | admin password (set together with the username above) |
+| `NYXDB_CORS_ORIGINS` | unset (CORS off) | comma-separated allowed origins, no wildcard |
 
 Source: `db/src/main.rs`, `db/src/auth.rs`.
 

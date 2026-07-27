@@ -4,7 +4,7 @@
 // without either side polling or restarting.
 //
 // Expects the server running at SERVER_URL (default http://127.0.0.1:8085)
-// with COUCHDB_CLONE_USER/COUCHDB_CLONE_PASSWORD matching TEST_USER/TEST_PASSWORD.
+// with NYXDB_USER/NYXDB_PASSWORD matching TEST_USER/TEST_PASSWORD.
 
 const PouchDB = require("pouchdb");
 

@@ -1,5 +1,5 @@
 {
-  "name": "couchdb-clone-integration-tests",
+  "name": "nyxdb-integration-tests",
   "private": true,
   "version": "0.1.0",
   "scripts": {
