@@ -4,5 +4,8 @@
   "version": "0.1.0",
   "dependencies": {
     "pouchdb": "^8.0.1"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }
