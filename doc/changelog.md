@@ -112,3 +112,30 @@ relying only on our own hand-written cases:
   (`USAGE.md` §7), not bugs to fix by copying a test.
 - Rewrote all documentation to be plainer and more direct — no content
   lost, just less narrative padding.
+- **Full project audit** before starting Phase 4 (see `AUDIT.md` for
+  the process and full findings). Dependency scan (`cargo audit`, 205
+  crates): no known vulnerabilities, 3 unmaintained-only warnings.
+  Live-tested error paths and found the same bug class already fixed
+  once in Phase 0 (non-JSON error bodies) in three more places:
+  malformed JSON body, wrong/missing `Content-Type`, and genuinely
+  unmatched routes all returned plain-text or empty responses instead
+  of this project's JSON error format. Fixed with a single outermost
+  middleware (`normalize_error_body` in `db/src/routes.rs`) that
+  rewrites any non-JSON 4xx/5xx response.
+  Also fixed: HTTP Basic auth compared credentials with plain `==` (a
+  timing side-channel — closed with a constant-time comparison), and
+  `credentials.json` had no explicit file permissions (world-readable
+  by default on the Linux/Docker deployment path — fixed to `0o600` on
+  Unix, unverified on this Windows dev machine since the `#[cfg(unix)]`
+  code doesn't compile in here).
+  Deferred two real findings that need more care than a quick fix: no
+  request body/batch size limit (memory-exhaustion vector, but the
+  right limit is a judgment call), and `storage.rs` panicking on
+  corrupted on-disk data instead of failing gracefully (touches the
+  core read path, deserves its own focused pass). Both logged in
+  `open-questions.md`, along with lower-priority review items (rate
+  limiting, connection caps, Docker running as root, `Credentials`
+  deriving `Debug`).
+  Verified no regression: 19 unit tests, both PouchDB integration
+  tests, the load test, the differential test against real CouchDB,
+  and all ported PouchDB test cases still pass.

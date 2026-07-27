@@ -12,6 +12,15 @@ default silently.
 - [x] **Credentials** — random per-install, or pinned via
       `COUCHDB_CLONE_USER`/`COUCHDB_CLONE_PASSWORD`. Required on every
       route except `GET /`. `db/src/auth.rs`.
+- [ ] **No request body / batch size limit** (from `AUDIT.md`). A client
+      can send an arbitrarily large body or `_bulk_docs` batch, fully
+      buffered in memory before parsing. Needs a size decided, not just
+      implemented — too low breaks legitimate large syncs.
+- [ ] **No cap on concurrent `feed=continuous` connections** (from
+      `AUDIT.md`). Verified correct up to 80 concurrent; not verified
+      against resource exhaustion at much larger scale.
+- [ ] **Docker image runs as root** (from `AUDIT.md`) — no `USER`
+      directive. Standard hardening, low urgency for a LAN deployment.
 
 ## Architecture
 - [ ] `axum` vs `actix-web` — using axum, not revisited.
@@ -29,12 +38,22 @@ default silently.
       risk for a small gain). Not worth it at current scale.
 - [x] Memory vs. real CouchDB — measured, this server is 2-3x lighter.
       Not a gap.
+- [ ] **Panics on corrupted on-disk data** (from `AUDIT.md`). `storage.rs`
+      uses `.expect()` deserializing stored documents — a corrupted data
+      directory panics the request instead of a clean 500. Fixing this
+      properly touches the core read path; deserves its own focused pass.
+- [ ] **`Credentials` derives `Debug`** (from `AUDIT.md`). Not logged
+      anywhere today, but a future `{:?}` on `AppState` would leak the
+      password. Cheap to harden (manual redacted `Debug` impl) even
+      though nothing exploits it currently.
 
 ## Scope
-- [ ] `_session` cookie auth — no concrete need yet.
-- [ ] Attachments — no concrete need yet.
+- [ ] Attachments — the only remaining Phase 4 item.
 - [ ] Discovery/pairing between client and server (mDNS? pairing code?)
       — separate from the protocol itself, needs an answer eventually.
+
+`_session` cookie auth and Mango/`_find` proxying are dropped from
+scope entirely — not "no concrete need yet," just not planned.
 
 ## Process
 - [x] Differential testing against real CouchDB doesn't need Docker —

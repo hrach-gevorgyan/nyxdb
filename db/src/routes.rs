@@ -6,9 +6,10 @@ use crate::changes::{ChangeEvent, ChangeFeed, ChangeFeedRegistry};
 use crate::revtree::RevNode;
 use crate::storage::Db;
 use axum::{
-    body::{Body, Bytes},
-    extract::{Path, Query, State},
-    http::StatusCode,
+    body::{to_bytes, Body, Bytes},
+    extract::{Path, Query, Request, State},
+    http::{header, StatusCode},
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Json, Router,
@@ -63,7 +64,46 @@ pub fn build_router(state: AppState) -> Router {
         .route("/:db/_local/:id", get(get_local).put(put_local))
         .route("/:db/_changes", get(changes))
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth::require_auth))
+        // Outermost: catches everything the handlers above don't produce
+        // themselves — genuinely unmatched routes, malformed JSON bodies,
+        // wrong/missing Content-Type. Axum's own responses for these are
+        // plain-text or empty, which breaks JSON-only clients like
+        // PouchDB (found by actually sending bad requests, see
+        // doc/AUDIT.md).
+        .layer(axum::middleware::from_fn(normalize_error_body))
         .with_state(state)
+}
+
+async fn normalize_error_body(request: Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    let status = response.status();
+    if !(status.is_client_error() || status.is_server_error()) {
+        return response;
+    }
+    let already_json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if already_json {
+        return response;
+    }
+
+    let (parts, body) = response.into_parts();
+    let bytes = to_bytes(body, 8192).await.unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes);
+    let reason = if text.trim().is_empty() {
+        parts.status.canonical_reason().unwrap_or("error").to_lowercase().replace(' ', "_")
+    } else {
+        text.trim().to_string()
+    };
+    let error = match parts.status {
+        StatusCode::NOT_FOUND => "not_found",
+        StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
+        s if s.is_server_error() => "internal_error",
+        _ => "bad_request",
+    };
+    (parts.status, Json(json!({"error": error, "reason": reason}))).into_response()
 }
 
 async fn server_info() -> Json<Value> {

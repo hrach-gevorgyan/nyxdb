@@ -32,19 +32,24 @@ today, [changelog.md](changelog.md) for how/why things changed.
 - [x] Differential testing against real CouchDB (`test/differential/`)
       — matches exactly
 
-## Phase 4 — Only if actually needed
+## Phase 4 — Attachments
 - [x] Closed most of a disk-size gap found in benchmarking (3.5x → 1.29x
       vs. CouchDB). Also measured memory against real CouchDB — this
       server is 2-3x lighter, not a gap. Full story in `changelog.md`
       and `BENCHMARKS.md`.
+- [ ] Full project audit (correctness, security, stability) before
+      starting attachments work — see `AUDIT.md`.
 - [ ] Attachments
-- [ ] Mango/`_find` proxying
-- [ ] `_session` cookie auth
 
-Nothing below Phase 3 is planned without a concrete need — see
-`open-questions.md`.
+Mango/`_find` proxying and `_session` cookie auth are dropped from
+scope — no concrete need, not planned.
+
+## After Phase 4
+- Close every remaining item in `open-questions.md`.
+- Start testing against the real target app.
 
 ## Status
 Phases 0–3 done. Verified with a real PouchDB client, load testing, and
 differential testing against real CouchDB. Plaintext HTTP only — keep
-this on a trusted LAN until TLS is decided.
+this on a trusted LAN until TLS is decided. Full audit in progress
+before starting Phase 4 — see `AUDIT.md`.

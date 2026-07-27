@@ -44,6 +44,15 @@ impl Credentials {
         std::fs::create_dir_all(data_dir)?;
         let creds = Self { username: "admin".to_string(), password: uuid::Uuid::new_v4().to_string() };
         std::fs::write(&path, serde_json::to_vec_pretty(&creds)?)?;
+        // A freshly-written file otherwise inherits the process umask —
+        // often world-readable on Linux (the Docker deployment path).
+        // No Windows equivalent via std; Windows ACLs default to the
+        // owning user anyway for files created in a user-owned directory.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(creds)
     }
 }
@@ -66,9 +75,25 @@ pub async fn require_auth(State(state): State<AppState>, request: Request, next:
         .and_then(|decoded| decoded.split_once(':').map(|(u, p)| (u.to_string(), p.to_string())));
 
     match provided {
-        Some((user, pass)) if user == state.creds.username && pass == state.creds.password => next.run(request).await,
+        Some((user, pass))
+            if constant_time_eq(&user, &state.creds.username) && constant_time_eq(&pass, &state.creds.password) =>
+        {
+            next.run(request).await
+        }
         _ => unauthorized(),
     }
+}
+
+/// Plain `==` on credentials is a timing side-channel — comparison
+/// exits early on the first mismatched byte, so response time leaks
+/// how many leading characters an attacker guessed correctly. Lower
+/// real-world severity here since HTTP Basic auth already sends
+/// credentials in cleartext over plain HTTP, but cheap to close.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.as_bytes().iter().zip(b.as_bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn unauthorized() -> Response {
