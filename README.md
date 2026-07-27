@@ -33,22 +33,28 @@ out, is in [doc/changelog.md](doc/changelog.md).
 One machine, one run each, release build vs. a real local CouchDB
 3.5.2 — order-of-magnitude numbers, not a lab-grade benchmark. Full
 methodology, historical progression, and honest caveats in
-**[doc/BENCHMARKS.md](doc/BENCHMARKS.md)**.
+**[doc/BENCHMARKS.md](doc/BENCHMARKS.md)**, re-run and updated after
+every release.
+
+**Last tested: v0.1.4, 2026-07-27.**
 
 | | NyxDB | Real CouchDB | Ratio |
 |---|---|---|---|
-| Install size | 4.37 MB | 229 MB | ~52x smaller |
-| Write throughput (5,000 docs, one `_bulk_docs`) | ~23,900 docs/sec | ~3,670 docs/sec | ~6.5x faster |
-| Read throughput (200 sequential `GET`) | 12.28ms/req | 13.20ms/req | ~1.07x faster |
-| Idle memory | 30.4 MB | ~93.5 MB | ~3x lighter |
-| Memory under load | 52 MB | ~116 MB | ~2x lighter |
+| Install size | 4.39 MB | 229 MB | ~52x smaller |
+| Write throughput (5,000 docs, one `_bulk_docs`) | ~16,000 docs/sec | ~3,370 docs/sec | ~4.75x faster |
+| Read throughput (200 sequential `GET`) | 9.47ms/req | 10.16ms/req | ~1.07x faster |
+| Idle memory | 28.2 MB | ~93.5 MB | ~3.3x lighter |
+| Memory after a 5,000-doc write | 35.4 MB | ~116 MB | ~3.3x lighter |
 | Disk size (same 5,000-doc dataset) | 1.83 MB | 1.74 MB | ~1.05x more |
 | Startup time | <20ms | seconds (Erlang/OTP boot) | — |
 | `_changes` in-process notification latency | ~0.14ms | not measured | — |
 
+Write throughput varies noticeably run to run on a shared dev machine
+(this round: 4.75x, a prior release measured 6.5x under lighter load)
+— see [doc/BENCHMARKS.md](doc/BENCHMARKS.md) for the honest caveat.
 Disk size is the one metric that doesn't outright win, and it's close
-— see [doc/BENCHMARKS.md](doc/BENCHMARKS.md) for what that gap
-actually costs at real-world scale (it's small).
+— see that file for what the gap actually costs at real-world scale
+(it's small).
 
 ## Compatibility
 

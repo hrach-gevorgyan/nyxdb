@@ -5,6 +5,65 @@
 > `COUCHDB_CLONE_*` env var prefix (now `NYXDB_*`) — left as an honest
 > historical record rather than rewritten.
 
+## v0.1.4
+
+**Real bug found live-testing against a real PouchDB app** (offlog-app
++ offlog-desktop's embedded NyxDB sidecar), reproduced independently
+twice, including once on a completely fresh install with zero prior
+state: `_bulk_get` returned `{"error":{"reason":"deleted"}}` for a
+revision that genuinely exists in the tree but happens to be a
+tombstone — a losing conflict branch, or a fully-deleted document's
+resolved winner — instead of returning it as a normal `ok` result with
+`_deleted:true` embedded in the body.
+
+Confirmed directly against real CouchDB 3.5.2 (not assumed) that it
+always returns `"ok"` with `_deleted:true` for any revision that
+exists in the tree, whether requested explicitly by rev or resolved
+via the current winner, and never uses the `"reason":"deleted"` error
+shape at all — that error path doesn't exist for `_bulk_get` in real
+CouchDB. This mismatch broke real PouchDB replication end to end:
+`getDocs()`/`bulkGet()` (`pouchdb.js`) treats any `doc.error` entry in
+a batch as a hard failure and aborts the whole sync with a generic
+"There was a problem getting docs." error — so any sync touching an
+unresolved multi-way conflict failed permanently. The most common
+real-world trigger: two independently-seeded devices pairing for the
+first time, each having created the same fixed-ID default documents
+locally before ever syncing — exactly offlog-app's own
+`seedIfEmpty()`/`clearLocalSeedBeforeFirstPair()` scenario.
+
+Investigated an initial lead (a suspicious jump in `_changes` sequence
+numbers, landing in the 2,000,000 range for the affected documents)
+and ruled it out directly: that's sled's own `generate_id()` batch-
+reservation behavior, not a bug — sequence numbers are already
+documented as opaque and non-portable between servers (`doc/USAGE.md`
+§7), so a jump in the *value* was a red herring, not the actual defect.
+The real bug was purely in how `bulk_get` (`db/src/routes.rs`) mapped
+a tombstoned tree node to a response, independent of the revision-tree
+insertion logic itself (already correct, per the passing differential
+test and `revtree::tests::*`).
+
+Fixed by returning the tombstone's body as an `ok` result with
+`_deleted:true` set, for both the explicit-rev and resolved-winner
+cases — plain `GET /{db}/{id}` (no `rev`) deliberately keeps its
+existing, different 404-on-deleted-winner behavior, since "does this
+document currently exist" and "give me this specific revision's
+content" are genuinely different questions, and real CouchDB answers
+them differently too (verified directly, both ways, before fixing).
+
+Added two regression tests (`test/ported/pouchdb_tests.js`): the
+explicit-rev case and the no-rev/deleted-winner case, plus a guard
+test confirming plain `GET` still 404s correctly (so the fix doesn't
+overcorrect). Confirmed both new tests fail against the pre-fix code
+and pass against the fix. Full existing suite re-verified: 19 unit
+tests, both PouchDB integration tests, all ported cases (13 total now),
+attachments, load test, and the differential test against real
+CouchDB — all pass.
+
+Benchmarks re-run and `doc/BENCHMARKS.md` updated (see that file for
+the full numbers and a note on this run's write-throughput variance,
+which is machine noise, not a regression — nothing in this release
+touches the write path).
+
 ## v0.1.3
 
 **Real bug found live-testing against a real PouchDB app** (Offlog):

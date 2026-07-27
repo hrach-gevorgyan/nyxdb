@@ -194,12 +194,78 @@ async function testSinglePutNewEditsFalseCreatesConflict() {
   await deleteDb(db);
 }
 
+// Real bug found live-testing against a real PouchDB app (see
+// doc/changelog.md): `_bulk_get` returned `{"error":{"reason":"deleted"}}`
+// for a revision that genuinely exists in the tree but happens to be a
+// tombstone (a losing conflict branch, or a fully-deleted document's
+// winner) — instead of the actual document content with `_deleted:true`
+// embedded, as an "ok" result. Confirmed directly against real CouchDB
+// 3.5.2 that it always returns "ok" with `_deleted:true` for any
+// revision that exists, whether requested explicitly or resolved via
+// the winner, and never uses this error shape at all. This mismatch
+// broke real PouchDB replication: `getDocs()`/`bulkGet()` treats any
+// `doc.error` entry as a hard batch failure ("There was a problem
+// getting docs"), so a sync touching an unresolved multi-way conflict
+// (e.g. two independently-seeded devices' default docs merging on
+// first pairing) aborted permanently instead of completing.
+async function testBulkGetReturnsDeletedRevAsOk() {
+  const db = "ported_bulk_get_deleted_" + Date.now();
+  await createDb(db);
+
+  // Case 1: an explicitly-requested losing conflict leaf that's a tombstone.
+  await req(db, "PUT", "/doc1", { title: "original" });
+  await req(db, "PUT", "/doc1?new_edits=false", {
+    _id: "doc1",
+    _rev: "1-00000000000000000000000000000000",
+    _deleted: true,
+  });
+  const losingLeaf = await req(db, "POST", "/_bulk_get", {
+    docs: [{ id: "doc1", rev: "1-00000000000000000000000000000000" }],
+  });
+  const losingOk = losingLeaf.body.results?.[0]?.docs?.[0]?.ok;
+  check(
+    "_bulk_get for an explicitly-requested deleted conflict leaf returns ok with _deleted:true, not an error",
+    losingOk && losingOk._deleted === true,
+    JSON.stringify(losingLeaf.body)
+  );
+
+  // Case 2: no rev specified, and the current winner is itself a tombstone
+  // (a fully-deleted document, no live leaves left).
+  const created = await req(db, "PUT", "/doc2", { title: "x" });
+  await req(db, "PUT", "/doc2?new_edits=false", {
+    _id: "doc2",
+    _rev: "2-tomb",
+    _revisions: { start: 2, ids: ["tomb", created.body.rev.split("-")[1]] },
+    _deleted: true,
+  });
+  const noRev = await req(db, "POST", "/_bulk_get", { docs: [{ id: "doc2" }] });
+  const noRevOk = noRev.body.results?.[0]?.docs?.[0]?.ok;
+  check(
+    "_bulk_get with no rev for a fully-deleted document's winner returns ok with _deleted:true, not an error",
+    noRevOk && noRevOk._deleted === true,
+    JSON.stringify(noRev.body)
+  );
+
+  // A plain GET (not _bulk_get) for a fully-deleted document must still
+  // 404 — that's a genuinely different question ("does this exist right
+  // now") and real CouchDB does 404 there. Guards against overcorrecting.
+  const plainGet = await req(db, "GET", "/doc2");
+  check(
+    "plain GET still 404s for a fully-deleted document (unlike _bulk_get)",
+    plainGet.status === 404 && plainGet.body.reason === "deleted",
+    JSON.stringify(plainGet.body)
+  );
+
+  await deleteDb(db);
+}
+
 async function main() {
   await testSuccessiveNewEditsIdempotent();
   await testDeletionWithFullHistory();
   await testReservedIdDocument();
   await testRevsDiffEmptyArray();
   await testSinglePutNewEditsFalseCreatesConflict();
+  await testBulkGetReturnsDeletedRevAsOk();
 
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);

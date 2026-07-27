@@ -238,6 +238,20 @@ curl -u user:pass -X POST http://127.0.0.1:5984/mydb/_bulk_get \
 # ]}
 ```
 
+A revision that exists but is a tombstone (a deleted document, or a
+losing conflict branch that was itself a deletion) is still an `ok`
+result, with `_deleted:true` in the body — matching real CouchDB.
+`_bulk_get` never returns a `"reason":"deleted"` error; only a rev
+that doesn't exist at all gets `"reason":"missing"`. This matters for
+replication specifically: PouchDB's replicator fetches every open
+leaf via `_bulk_get`, including tombstoned ones, and treats *any*
+error entry as a hard batch failure — see `doc/changelog.md` for the
+real sync failure this caused before it was fixed. (Contrast with a
+plain `GET /{db}/{id}` with no `rev`: that one *does* 404 with
+`"reason":"deleted"` when the current winner is a tombstone, since
+"does this document currently exist" is a genuinely different
+question from "give me this specific revision's content.")
+
 ### `GET/PUT /{db}/_local/{id}`
 Replication checkpoints. Last-write-wins, never shows up in `_changes`.
 This is how `live:true` resumes after a restart instead of re-syncing
@@ -301,10 +315,10 @@ changes instead of catching up. See `changelog.md`.
 ## 6. Benchmarks
 
 Full numbers, including memory and disk vs. real CouchDB, are in
-[BENCHMARKS.md](BENCHMARKS.md). Summary: ~54x smaller install, ~7.5x
-faster writes, comparable reads, 2-3x lighter memory, ~1.3x more disk
-per document (the one metric that doesn't win, and not a large one in
-absolute terms — see BENCHMARKS.md).
+[BENCHMARKS.md](BENCHMARKS.md), re-run and updated after every
+release (last tested: v0.1.4, 2026-07-27). Summary: ~52x smaller
+install, several times faster writes, comparable reads, ~3x lighter
+memory, and within ~5% of CouchDB's disk usage per document.
 
 Reproduce with `test/benchmark/`, `test/load/` (scale via
 `LOAD_BULK_SIZE`/`LOAD_SUBSCRIBERS`).

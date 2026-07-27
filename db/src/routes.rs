@@ -559,13 +559,29 @@ async fn bulk_get(
                 },
             };
             match tree.nodes.get(&rev_id) {
-                Some(node) if node.deleted => {
-                    Ok(json!({"error": {"id": id, "rev": rev_id, "error": "not_found", "reason": "deleted"}}))
-                }
+                // A specific (or resolved-winner) revision that exists in
+                // the tree is a real, fetchable revision even if it's a
+                // tombstone — real CouchDB returns it as an "ok" result
+                // with `_deleted:true` in the body, never an error here.
+                // Confirmed directly against CouchDB 3.5.2: this holds
+                // both for an explicitly-requested deleted leaf (a losing
+                // conflict branch) and for a resolved winner that's
+                // itself a tombstone (a fully-deleted document) — `_bulk_get`
+                // never uses the "reason":"deleted" error PouchDB's own
+                // `getDocs()` treats as a hard batch failure (`doc.error`
+                // aborts the whole replication batch), unlike plain
+                // `GET /{db}/{id}` (see `get_doc`), which does 404 on a
+                // deleted winner since that's asking "does this document
+                // currently exist," a different question. Fixed after
+                // this exact mismatch broke real replication — see
+                // `doc/changelog.md`.
                 Some(node) => {
                     let mut body = node.body.clone();
                     body["_id"] = json!(id);
                     body["_rev"] = json!(rev_id);
+                    if node.deleted {
+                        body["_deleted"] = json!(true);
+                    }
                     Ok(json!({"ok": body}))
                 }
                 None => Ok(json!({"error": {"id": id, "rev": rev_id, "error": "not_found", "reason": "missing"}})),
