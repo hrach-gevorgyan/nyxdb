@@ -94,6 +94,7 @@ instead? See **[doc/MIGRATING.md](doc/MIGRATING.md)**.
 - **[doc/MIGRATING.md](doc/MIGRATING.md)** — point an existing PouchDB app (currently on CouchDB) at this server instead.
 - **[doc/BENCHMARKS.md](doc/BENCHMARKS.md)** — speed, size, and memory vs. real CouchDB.
 - **[doc/AUDIT.md](doc/AUDIT.md)** — security/stability audit process and findings.
+- **[SECURITY.md](SECURITY.md)** — how to report a vulnerability.
 - **[doc/roadmap.md](doc/roadmap.md)** — what's done, what's not.
 - **[doc/changelog.md](doc/changelog.md)** — history of what changed and why.
 
