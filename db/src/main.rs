@@ -27,8 +27,16 @@ fn cors_layer() -> Option<CorsLayer> {
     Some(
         CorsLayer::new()
             .allow_origin(parsed)
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any),
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+                axum::http::Method::OPTIONS,
+                axum::http::Method::HEAD,
+            ])
+            .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION])
+            .allow_credentials(true),
     )
 }
 
