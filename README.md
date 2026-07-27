@@ -107,6 +107,10 @@ instead? See **[doc/MIGRATING.md](doc/MIGRATING.md)**.
 
 See **[doc/roadmap.md](doc/roadmap.md)** for what's done and what's next.
 
+## License
+
+Dual-licensed under either [MIT](LICENSE-MIT) or [Apache License, Version 2.0](LICENSE-APACHE), at your option.
+
 ---
 
 NyxDB is an independent, unofficial reimplementation inspired by Apache

@@ -3,6 +3,7 @@ name = "nyxdb"
 description = "NyxDB — a from-scratch reimplementation of CouchDB's replication protocol in Rust"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 axum = "0.7"
