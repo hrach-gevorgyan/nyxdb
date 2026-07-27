@@ -35,12 +35,23 @@ Phase 4.
 
 ### Safe — verified, no action needed
 - No known CVEs in the dependency tree (`cargo audit`, 205 crates
-  scanned). Three "unmaintained" warnings (`bincode`, `fxhash`,
-  `instant`) — maintenance-status only, not vulnerabilities.
+  scanned, re-checked before the v0.1.0 release). Three "unmaintained"
+  warnings (`bincode`, direct dependency; `fxhash`/`instant`,
+  transitive via `sled`) — maintenance-status only, not
+  vulnerabilities. `fxhash`/`instant` have no fix available short of
+  replacing `sled` itself (0.34 is its last pre-1.0 release); `bincode`
+  1.x → 2.x is a real option but touches the on-disk storage format
+  directly, deliberately not rushed into this release — revisit if a
+  real advisory appears for any of the three.
 - No `panic!`/`unreachable!`/`todo!` anywhere in the source.
 - No SQL or shell execution anywhere — no injection surface of that kind.
-- CORS is correctly scoped: explicit allowlist, no wildcard, credentials
-  not enabled.
+- CORS is correctly scoped: explicit allowlist, no wildcard. Credentials
+  (`allow_credentials(true)`) were enabled after real-browser testing
+  found the combination of `Any` methods/headers with no credentials
+  flag silently broke every actual (non-preflight) request from a
+  browser-based PouchDB client — methods/headers are now an explicit
+  list (required alongside `allow_credentials`, since CORS forbids
+  combining credentials with wildcard `Any`), still no wildcard origin.
 - Malformed `Authorization` headers and non-object entries in
   `_bulk_docs` are handled gracefully (no panic).
 - `Db::open` runs on every request but sled caches trees internally —
