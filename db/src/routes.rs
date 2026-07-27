@@ -24,6 +24,10 @@ pub struct AppState {
     pub root: Arc<sled::Db>,
     pub feeds: ChangeFeedRegistry,
     pub creds: Arc<crate::auth::Credentials>,
+    /// Generated once at startup, stable for the process lifetime — real
+    /// CouchDB returns the same uuid on every `GET /` for a given server,
+    /// not a fresh one per request.
+    pub server_uuid: Arc<str>,
 }
 
 /// CouchDB clients (PouchDB included) expect a JSON body on error
@@ -107,11 +111,11 @@ async fn normalize_error_body(request: Request, next: Next) -> Response {
     (parts.status, Json(json!({"error": error, "reason": reason}))).into_response()
 }
 
-async fn server_info() -> Json<Value> {
+async fn server_info(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "couchdb": "Welcome",
         "version": env!("CARGO_PKG_VERSION"),
-        "uuid": uuid::Uuid::new_v4().to_string(),
+        "uuid": &*state.server_uuid,
     }))
 }
 
@@ -336,7 +340,7 @@ async fn bulk_docs(
     let docs = payload
         .get("docs")
         .and_then(Value::as_array)
-        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
+        .ok_or(ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
     let new_edits = payload.get("new_edits").and_then(Value::as_bool).unwrap_or(true);
 
     if new_edits {
@@ -457,7 +461,7 @@ async fn revs_diff(
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
-    let requested = payload.as_object().ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
+    let requested = payload.as_object().ok_or(ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
 
     let mut result = serde_json::Map::new();
     for (doc_id, revs) in requested {
@@ -488,7 +492,7 @@ async fn bulk_get(
     let requests = payload
         .get("docs")
         .and_then(Value::as_array)
-        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
+        .ok_or(ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
 
     let mut results = Vec::with_capacity(requests.len());
     for req in requests {

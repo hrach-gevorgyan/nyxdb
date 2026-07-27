@@ -5,11 +5,11 @@
 // servers, deleted at the end - never touches any pre-existing db.
 //
 // Requires:
-//   OUR_URL/OUR_USER/OUR_PASSWORD     - default http://127.0.0.1:8085, testuser/testpass
+//   SERVER_URL/OUR_USER/OUR_PASSWORD     - default http://127.0.0.1:8085, testuser/testpass
 //   COUCH_URL/COUCH_USER/COUCH_PASSWORD - default http://127.0.0.1:5984, no default creds (required)
 //   BENCH_DOC_COUNT                    - default 5000
 
-const OUR_URL = process.env.OUR_URL || "http://127.0.0.1:8085";
+const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
 const OUR_USER = process.env.OUR_USER || "testuser";
 const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
 const COUCH_URL = process.env.COUCH_URL || "http://127.0.0.1:5984";
@@ -101,7 +101,7 @@ class Server {
 }
 
 async function main() {
-  const ours = new Server("ours", OUR_URL, OUR_USER, OUR_PASSWORD);
+  const ours = new Server("ours", SERVER_URL, OUR_USER, OUR_PASSWORD);
   const couch = new Server("couchdb", COUCH_URL, COUCH_USER, COUCH_PASSWORD);
 
   console.log(`Benchmarking with ${DOC_COUNT} documents...\n`);

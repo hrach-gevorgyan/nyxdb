@@ -11,12 +11,12 @@
 // CouchDB's MD5, and the plan never requires byte-for-byte parity there).
 //
 // Requires:
-//   OUR_URL       - this server, default http://127.0.0.1:8085
+//   SERVER_URL       - this server, default http://127.0.0.1:8085
 //   OUR_USER/OUR_PASSWORD       - default testuser/testpass
 //   COUCH_URL     - real CouchDB, default http://127.0.0.1:5984
 //   COUCH_USER/COUCH_PASSWORD   - required, no default (must be your own admin creds)
 
-const OUR_URL = process.env.OUR_URL || "http://127.0.0.1:8085";
+const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
 const OUR_USER = process.env.OUR_USER || "testuser";
 const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
 const COUCH_URL = process.env.COUCH_URL || "http://127.0.0.1:5984";
@@ -121,7 +121,7 @@ function deepEqual(a, b) {
 }
 
 async function main() {
-  const ours = new Server("ours", OUR_URL, OUR_USER, OUR_PASSWORD);
+  const ours = new Server("ours", SERVER_URL, OUR_USER, OUR_PASSWORD);
   const couch = new Server("couchdb", COUCH_URL, COUCH_USER, COUCH_PASSWORD);
 
   await ours.createDb();

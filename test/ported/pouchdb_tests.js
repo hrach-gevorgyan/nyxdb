@@ -12,9 +12,9 @@
 // not ported; making them pass would mean silently changing documented,
 // deliberate behavior.
 //
-// Requires: OUR_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
+// Requires: SERVER_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
 
-const OUR_URL = process.env.OUR_URL || "http://127.0.0.1:8085";
+const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
 const OUR_USER = process.env.OUR_USER || "testuser";
 const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
 const AUTH = "Basic " + Buffer.from(`${OUR_USER}:${OUR_PASSWORD}`).toString("base64");
@@ -31,7 +31,7 @@ function check(name, condition, detail) {
 }
 
 async function req(dbName, method, path, body) {
-  const resp = await fetch(`${OUR_URL}/${dbName}${path}`, {
+  const resp = await fetch(`${SERVER_URL}/${dbName}${path}`, {
     method,
     headers: { "Content-Type": "application/json", Authorization: AUTH },
     body: body !== undefined ? JSON.stringify(body) : undefined,

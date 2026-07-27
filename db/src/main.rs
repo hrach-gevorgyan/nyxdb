@@ -79,7 +79,12 @@ async fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(50 * 1024 * 1024);
 
-    let mut app = build_router(AppState { root, feeds: ChangeFeedRegistry::default(), creds: Arc::new(creds) })
+    let mut app = build_router(AppState {
+        root,
+        feeds: ChangeFeedRegistry::default(),
+        creds: Arc::new(creds),
+        server_uuid: Arc::from(uuid::Uuid::new_v4().to_string()),
+    })
         .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes));
     // CORS must wrap auth (outermost), not the other way round: tower_http's
     // CorsLayer answers OPTIONS preflight requests itself, and a preflight

@@ -2,11 +2,11 @@
 // and a real PouchDB client's putAttachment()/getAttachment() methods,
 // since that's the actual client this server needs to support.
 //
-// Requires: OUR_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
+// Requires: SERVER_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
 
 const PouchDB = require("pouchdb");
 
-const OUR_URL = process.env.OUR_URL || "http://127.0.0.1:8085";
+const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
 const OUR_USER = process.env.OUR_USER || "testuser";
 const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
 const AUTH = "Basic " + Buffer.from(`${OUR_USER}:${OUR_PASSWORD}`).toString("base64");
@@ -23,7 +23,7 @@ function check(name, condition, detail) {
 }
 
 async function req(dbName, method, path, body, extraHeaders) {
-  const resp = await fetch(`${OUR_URL}/${dbName}${path}`, {
+  const resp = await fetch(`${SERVER_URL}/${dbName}${path}`, {
     method,
     headers: { Authorization: AUTH, ...extraHeaders },
     body,
@@ -120,10 +120,10 @@ async function testMalformedAttachmentRejected() {
 // attachment API, not our raw HTTP endpoints directly.
 async function testRealPouchDBClient() {
   const dbName = "att_pouchdb_" + Date.now();
-  const createResp = await fetch(`${OUR_URL}/${dbName}`, { method: "PUT", headers: { Authorization: AUTH } });
+  const createResp = await fetch(`${SERVER_URL}/${dbName}`, { method: "PUT", headers: { Authorization: AUTH } });
   if (!createResp.ok) throw new Error(`could not create db: ${createResp.status}`);
 
-  const remote = new PouchDB(`${OUR_URL}/${dbName}`, { auth: { username: OUR_USER, password: OUR_PASSWORD } });
+  const remote = new PouchDB(`${SERVER_URL}/${dbName}`, { auth: { username: OUR_USER, password: OUR_PASSWORD } });
 
   await remote.put({ _id: "doc1", title: "has an attachment" });
   const doc = await remote.get("doc1");

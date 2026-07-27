@@ -2,6 +2,10 @@
 /data
 node_modules/
 *.log
-test/integration/inttest_*/
-test/integration/livetest_*/
+# PouchDB's local test databases land wherever a script's cwd is when
+# it's run — repo root if you run `node test/integration/run.js` from
+# the top, or under test/integration/ if you cd there first.
+inttest_*/
+livetest_*/
+data-*/
 credentials.json

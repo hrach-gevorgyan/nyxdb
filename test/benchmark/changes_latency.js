@@ -5,9 +5,9 @@
 // each PUT request resolves to when that change line arrives on the
 // subscriber's stream.
 //
-// Requires: OUR_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
+// Requires: SERVER_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
 
-const OUR_URL = process.env.OUR_URL || "http://127.0.0.1:8085";
+const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
 const OUR_USER = process.env.OUR_USER || "testuser";
 const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
 const SAMPLE_COUNT = Number(process.env.LATENCY_SAMPLES || 100);
@@ -15,7 +15,7 @@ const DB_NAME = "latencytest_" + Date.now();
 const AUTH = "Basic " + Buffer.from(`${OUR_USER}:${OUR_PASSWORD}`).toString("base64");
 
 async function req(method, path, body) {
-  const resp = await fetch(`${OUR_URL}${path}`, {
+  const resp = await fetch(`${SERVER_URL}${path}`, {
     method,
     headers: { "Content-Type": "application/json", Authorization: AUTH },
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -29,7 +29,7 @@ async function main() {
   // Open one continuous subscriber and keep it running for the whole test.
   const arrivalTimes = new Map(); // doc id -> Date.now() when the line arrived
   const controller = new AbortController();
-  const resp = await fetch(`${OUR_URL}/${DB_NAME}/_changes?feed=continuous&since=0`, {
+  const resp = await fetch(`${SERVER_URL}/${DB_NAME}/_changes?feed=continuous&since=0`, {
     headers: { Authorization: AUTH },
     signal: controller.signal,
   });
