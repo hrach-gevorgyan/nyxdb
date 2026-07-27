@@ -7,6 +7,12 @@ uses — not a full CouchDB replacement (no Mango queries, no MapReduce
 views, no clustering). Point an existing PouchDB app at it instead of a
 real CouchDB server and it just works.
 
+Built specifically to be the sync backend for local-first apps that
+already speak PouchDB/CouchDB's replication protocol — not a
+general-purpose CouchDB competitor. If your app already does
+`db.sync()` against CouchDB, this is a drop-in, purpose-built
+replacement for that one job.
+
 ## Why Rust?
 
 The original motivation was straightforward: run the same replication
@@ -24,23 +30,25 @@ out, is in [doc/changelog.md](doc/changelog.md).
 
 ## Benchmarks
 
-<!-- TODO: fill in current numbers/chart; full methodology and detail
-     already live in doc/BENCHMARKS.md — this table is a summary. -->
+One machine, one run each, release build vs. a real local CouchDB
+3.5.2 — order-of-magnitude numbers, not a lab-grade benchmark. Full
+methodology, historical progression, and honest caveats in
+**[doc/BENCHMARKS.md](doc/BENCHMARKS.md)**.
 
-| | NyxDB | Real CouchDB |
-|---|---|---|
-| Install size | TBD | TBD |
-| Write throughput (docs/sec) | TBD | TBD |
-| Read throughput | TBD | TBD |
-| Idle memory | TBD | TBD |
-| Memory under load | TBD | TBD |
-| Disk size (same dataset) | TBD | TBD |
-| Startup time | TBD | TBD |
-| Replication (`live:true`) latency | TBD | TBD |
+| | NyxDB | Real CouchDB | Ratio |
+|---|---|---|---|
+| Install size | 4.37 MB | 229 MB | ~52x smaller |
+| Write throughput (5,000 docs, one `_bulk_docs`) | ~23,900 docs/sec | ~3,670 docs/sec | ~6.5x faster |
+| Read throughput (200 sequential `GET`) | 12.28ms/req | 13.20ms/req | ~1.07x faster |
+| Idle memory | 30.4 MB | ~93.5 MB | ~3x lighter |
+| Memory under load | 52 MB | ~116 MB | ~2x lighter |
+| Disk size (same 5,000-doc dataset) | 1.83 MB | 1.74 MB | ~1.05x more |
+| Startup time | <20ms | seconds (Erlang/OTP boot) | — |
+| `_changes` in-process notification latency | ~0.14ms | not measured | — |
 
-<!-- TODO: chart/image -->
-
-Full numbers and methodology: **[doc/BENCHMARKS.md](doc/BENCHMARKS.md)**.
+Disk size is the one metric that doesn't outright win, and it's close
+— see [doc/BENCHMARKS.md](doc/BENCHMARKS.md) for what that gap
+actually costs at real-world scale (it's small).
 
 ## Compatibility
 

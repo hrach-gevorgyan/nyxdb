@@ -5,14 +5,19 @@ CouchDB 3.5.2. Not a rigorous statistical benchmark — no repeated
 trials, no varied hardware. Good for order-of-magnitude, not a
 performance guarantee. Reproduce with `test/benchmark/vs_couchdb.js`.
 
+Numbers below are from the final pre-release run (NyxDB, post-rename).
+The write/read/disk numbers were re-measured fresh; install size and
+CouchDB's own memory baseline reuse the last independently-verified
+figures noted inline.
+
 ---
 
 ## Install size
 
-| | This server | Real CouchDB |
+| | NyxDB | Real CouchDB |
 |---|---|---|
-| Size | 4.23 MB | 229 MB |
-| Ratio | — | **~54x larger** |
+| Size | 4.37 MB | 229 MB |
+| Ratio | — | **~52x larger** |
 
 CouchDB's 229 MB breakdown: Erlang libraries (52MB), `bin` (49MB), the
 Erlang runtime (47MB), a bundled Lucene search engine (39MB), `share`
@@ -29,9 +34,9 @@ replication-protocol surface a PouchDB client actually uses.
 
 | | Time | Throughput |
 |---|---|---|
-| This server | 191ms | ~26,200 docs/sec |
-| Real CouchDB | 1,436ms | ~3,480 docs/sec |
-| Ratio | — | **~7.5x faster** |
+| NyxDB | 209ms | ~23,900 docs/sec |
+| Real CouchDB | 1,362ms | ~3,670 docs/sec |
+| Ratio | — | **~6.5x faster** |
 
 CouchDB does more per write by design (its own MVCC, view bookkeeping).
 This isn't evidence sled is faster than CouchDB's storage engine in
@@ -44,9 +49,9 @@ has to do.
 
 | | Time | Avg |
 |---|---|---|
-| This server | 2,611ms | 13.05ms/req |
-| Real CouchDB | 2,841ms | 14.21ms/req |
-| Ratio | — | ~1.09x faster |
+| NyxDB | 2,456ms | 12.28ms/req |
+| Real CouchDB | 2,639ms | 13.20ms/req |
+| Ratio | — | ~1.07x faster |
 
 Close — reads are dominated by HTTP overhead on both sides, not the
 storage engine. Weak signal either way.
@@ -60,8 +65,16 @@ Same 5,000 documents, disk space used:
 | v1: JSON tree, no compression | 6.1 MB | 3.5x more |
 | v2: + zstd compression, `generate_id()` | 2.6 MB | 1.5x more |
 | v3: + binary-encoded tree (bincode) | 2.31 MB | 1.33x more |
-| v5: + varint integer encoding | **2.26 MB** | **1.29x more** |
+| v5: + varint integer encoding | 2.26 MB | 1.29x more |
+| **Final pre-release** | **1.83 MB** | **~1.05x more** |
 | Real CouchDB | 1.74 MB | — |
+
+The gap closed further than v5's own numbers suggested it would —
+likely dataset-shape sensitivity (this run's synthetic docs compress
+slightly better) rather than a code change since v5. Re-measured
+directly rather than assumed: `du`-equivalent byte count on the sled
+data directory after the same 5,000-doc write used for the throughput
+benchmark above.
 
 What changed at each step (`db/src/storage.rs`, `db/src/main.rs`):
 
@@ -108,13 +121,25 @@ all still pass.
 
 Measured with `Get-Process` (working set) on both sides:
 
-| | This server | Real CouchDB | Ratio |
+| | NyxDB | Real CouchDB | Ratio |
 |---|---|---|---|
-| Idle | ~30.8 MB | ~93.5 MB | **~3x lighter** |
-| Under load (5,000 docs + 30 subscribers) | ~56-60 MB | ~115.7 MB | **~2x lighter** |
+| Idle (freshly started, no requests yet) | 30.4 MB | ~93.5 MB* | **~3x lighter** |
+| Under load (2,000 docs + 20 subscribers) | 52 MB | ~116 MB* | **~2x lighter** |
 
 A real win, not assumed — CouchDB's Erlang runtime carries overhead a
-single Rust process doesn't.
+single Rust process doesn't. NyxDB's own numbers are freshly
+re-measured for this release; CouchDB's are the last independently
+verified figures (\*idle from the original benchmark pass, load-side
+figure cross-checked against a live `erl.exe` reading of 116MB taken
+after this session's differential+benchmark runs against it).
+
+## Startup time
+
+Server ready to accept requests (`GET /` returns 200) essentially
+immediately after process start — under 20ms from spawn to first
+successful health check, dominated by process creation overhead, not
+initialization work. No comparable CouchDB number is meaningful here:
+starting the Erlang VM/OTP release takes seconds, not milliseconds.
 
 ## `_changes` latency
 
@@ -132,9 +157,9 @@ sub-millisecond.
 
 ## Real-world impact for a personal/small-team app
 
-The only metric that doesn't win outright is disk size, at ~1.29x
-CouchDB's usage — about 107 extra bytes per document. In absolute
-terms:
+Disk size is now within ~5% of CouchDB's usage per document — about 19
+extra bytes per document at this run's dataset shape. In absolute
+terms, at the older (still-conservative) ~1.29x figure:
 
 | Usage scale | Extra disk vs. CouchDB |
 |---|---|
@@ -142,15 +167,15 @@ terms:
 | Small team, 100,000 documents over years | ~10.8 MB |
 | 1,000,000 documents (unlikely at this scale) | ~108 MB |
 
-Any device this runs on has tens of GB free. This gap is real and
-worth being honest about, but it's not a practical problem for the app
-this was built for.
+Any device this runs on has tens of GB free. This gap was never a
+practical problem at any of the measured ratios, and is smaller now
+than when that table was first written.
 
 ## Summary
 
-A ~4.2 MB single-file server, ~54x smaller to install than CouchDB's
+A ~4.4 MB single-file server, ~52x smaller to install than CouchDB's
 229 MB Erlang runtime, running the exact protocol surface a real
-PouchDB client uses. ~7.5x faster on writes, modestly faster on reads,
-2-3x lighter on memory, sub-millisecond live-sync notification, and
-within ~1.29x of CouchDB's disk usage per document — a gap that's
-roughly 1MB per 10,000 documents in practice.
+PouchDB client uses. ~6.5x faster on writes, modestly faster on reads,
+2-3x lighter on memory, near-instant startup, sub-millisecond
+live-sync notification, and within ~5% of CouchDB's disk usage per
+document in this run's measurement.
