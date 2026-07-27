@@ -5,6 +5,13 @@ on:
     branches: [master, main]
   pull_request:
 
+# Least-privilege default: this workflow only checks out code and runs
+# tests, never writes to the repo, comments on PRs, or publishes
+# packages. Without this, GITHUB_TOKEN defaults to broad read/write
+# permissions for every job (flagged by CodeQL).
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
