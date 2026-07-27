@@ -7,7 +7,7 @@ development machine is real (see the write-throughput note below).
 Good for order-of-magnitude, not a performance guarantee. Reproduce
 with `test/benchmark/vs_couchdb.js`.
 
-**Last tested: 2026-07-27 17:21 UTC, NyxDB v0.1.4, against real CouchDB
+**Last tested: 2026-07-27 17:56 UTC, NyxDB v0.1.5, against real CouchDB
 3.5.2.** Write/read/disk/memory/startup numbers below are all from this
 run. Per-release testing policy: benchmarks are re-run and this file
 updated after every version bump, not left stale from an earlier
@@ -37,18 +37,17 @@ replication-protocol surface a PouchDB client actually uses.
 
 | | Time | Throughput |
 |---|---|---|
-| NyxDB | 312ms | ~16,000 docs/sec |
-| Real CouchDB | 1,482ms | ~3,370 docs/sec |
-| Ratio | — | **~4.75x faster** |
+| NyxDB | 306ms | ~16,340 docs/sec |
+| Real CouchDB | 1,292ms | ~3,870 docs/sec |
+| Ratio | — | **~4.2x faster** |
 
-Lower than the ~6.5x recorded in the previous release's run — this
-machine had a long session of accumulated background processes at
-measurement time, and both sides slowed down together (CouchDB's own
-number also dropped from ~3,670 to ~3,370 docs/sec versus last time),
-consistent with shared-machine noise rather than a code regression.
-Nothing in this release touches the write path. Re-measure on a quiet
-machine if the exact ratio matters to you; the qualitative result
-(several times faster) has been stable across every release so far.
+Similar to the ~4.75x measured for v0.1.4, both well below the ~6.5x
+seen at the initial release — same shared-machine-noise caveat as
+before, not a code regression (this release's actual code change was
+to `_changes`' sequence numbering, nowhere near the write path
+benchmarked here). Re-measure on a quiet machine if the exact ratio
+matters to you; the qualitative result (several times faster) has
+been stable across every release so far.
 
 CouchDB does more per write by design (its own MVCC, view bookkeeping).
 This isn't evidence sled is faster than CouchDB's storage engine in
@@ -61,9 +60,9 @@ has to do.
 
 | | Time | Avg |
 |---|---|---|
-| NyxDB | 1,895ms | 9.47ms/req |
-| Real CouchDB | 2,032ms | 10.16ms/req |
-| Ratio | — | ~1.07x faster |
+| NyxDB | 2,133ms | 10.66ms/req |
+| Real CouchDB | 2,158ms | 10.79ms/req |
+| Ratio | — | ~1.01x faster |
 
 Close — reads are dominated by HTTP overhead on both sides, not the
 storage engine. Weak signal either way.
@@ -78,7 +77,7 @@ Same 5,000 documents, disk space used:
 | v2: + zstd compression, `generate_id()` | 2.6 MB | 1.5x more |
 | v3: + binary-encoded tree (bincode) | 2.31 MB | 1.33x more |
 | v5: + varint integer encoding | 2.26 MB | 1.29x more |
-| v0.1.4 (current) | **1.83 MB** | **~1.05x more** |
+| v0.1.5 (current) | **1.84 MB** | **~1.06x more** |
 | Real CouchDB | 1.74 MB | — |
 
 The gap closed further than v5's own numbers suggested it would —
@@ -86,8 +85,10 @@ likely dataset-shape sensitivity (this run's synthetic docs compress
 slightly better) rather than a code change since v5. Re-measured
 directly rather than assumed: `du`-equivalent byte count on the sled
 data directory after the same 5,000-doc write used for the throughput
-benchmark above. Stable between v0.1.0 and v0.1.4 — nothing in the
-v0.1.1–v0.1.4 fixes touched storage encoding.
+benchmark above. Stable from v0.1.0 through v0.1.5 — none of the
+v0.1.1–v0.1.5 fixes touched document storage encoding (v0.1.5's fix
+was to the separate `seq_log` sequence-number tree, not the per-doc
+`docs` tree measured here).
 
 What changed at each step (`db/src/storage.rs`, `db/src/main.rs`):
 
@@ -136,12 +137,12 @@ Measured with `Get-Process` (working set) on both sides:
 
 | | NyxDB | Real CouchDB | Ratio |
 |---|---|---|---|
-| Idle (freshly started, no requests yet) | 28.2 MB | ~93.5 MB* | **~3.3x lighter** |
+| Idle (freshly started, no requests yet) | 27.8 MB | ~93.5 MB* | **~3.4x lighter** |
 | After a 5,000-doc write | 35.4 MB | ~116 MB* | **~3.3x lighter** |
 
 A real win, not assumed — CouchDB's Erlang runtime carries overhead a
 single Rust process doesn't. NyxDB's own numbers are freshly
-re-measured for v0.1.4; CouchDB's are the last independently verified
+re-measured for v0.1.5; CouchDB's are the last independently verified
 figures (\*idle from the original benchmark pass, load-side figure
 cross-checked against a live `erl.exe` reading of 116MB taken during
 this same testing session).
@@ -170,7 +171,7 @@ sub-millisecond.
 
 ## Real-world impact for a personal/small-team app
 
-Disk size is now within ~5% of CouchDB's usage per document — about 19
+Disk size is now within ~6% of CouchDB's usage per document — about 20
 extra bytes per document at this run's dataset shape. In absolute
 terms, at the older (still-conservative) ~1.29x figure:
 
@@ -186,10 +187,10 @@ than when that table was first written.
 
 ## Summary
 
-*(As of v0.1.4, 2026-07-27.)* A ~4.4 MB single-file server, ~52x
-smaller to install than CouchDB's 229 MB Erlang runtime, running the
-exact protocol surface a real PouchDB client uses. Several times
+*(As of v0.1.5, 2026-07-27 17:56 UTC.)* A ~4.4 MB single-file server,
+~52x smaller to install than CouchDB's 229 MB Erlang runtime, running
+the exact protocol surface a real PouchDB client uses. Several times
 faster on writes (exact ratio varies run to run, see the note above),
-modestly faster on reads, ~3x lighter on memory, near-instant startup,
-sub-millisecond live-sync notification, and within ~5% of CouchDB's
+about as fast on reads, ~3.3x lighter on memory, near-instant startup,
+sub-millisecond live-sync notification, and within ~6% of CouchDB's
 disk usage per document.

@@ -5,6 +5,60 @@
 > `COUCHDB_CLONE_*` env var prefix (now `NYXDB_*`) — left as an honest
 > historical record rather than rewritten.
 
+## v0.1.5
+
+**Follow-up investigation** of a reported anomaly: `_changes` sequence
+numbers jumping by roughly 2,000,000 around conflicted-document
+writes, flagged as a possible unresolved side effect of the same code
+path behind the v0.1.4 `_bulk_get` bug. Investigated directly rather
+than assumed either way — the report explicitly asked whether this was
+"a deliberate, bounded design... or an unintended side effect."
+
+**Found two separate things while investigating:**
+
+1. **The reported jump itself is not a bug.** Traced to sled's own
+   source (`idgen_persist_interval`, default 1,000,000): `generate_id()`
+   increments by exactly 1 per call during normal operation — it never
+   jumps in value. On database *reopen*, though, sled deliberately
+   resumes counting from beyond its last-persisted checkpoint (not the
+   true last-used value) so it can never reuse an id after an unclean
+   shutdown — confirmed directly by restarting a real instance against
+   the same data directory and watching the next `seq` land at
+   2,000,001 instead of continuing from 8. The correlation with
+   "conflicted batches" in the original report was coincidental,
+   not causal — pairing two devices for the first time plausibly
+   happens right after starting/restarting the embedded sidecar
+   process, which is what was actually triggering it. Documented in
+   `doc/USAGE.md` so this doesn't get re-reported as a mystery.
+
+2. **A real, more serious bug found as a side effect of checking the
+   first hypothesis**: `generate_id()` starts at 0, but `since=0`
+   (what every fresh `db.sync()` starts with) means "from the very
+   beginning" — `changes_since` correctly treats `since` as exclusive
+   (`seq > since`), which made the **very first document ever written
+   to a fresh database permanently invisible** to any client's initial
+   sync. Confirmed directly: a fresh database with exactly one document
+   reported `doc_count:1` but `_changes` returned zero results. This
+   is a more universal bug than the seq-jump report itself (it hits
+   every single fresh database's first write, not just conflicted
+   ones) and had gone unnoticed because most testing so far seeded
+   multiple documents at once, masking it.
+
+   Fixed by shifting persisted `seq` values into `1..=u64::MAX` (never
+   0), so `since=0` unambiguously means "nothing seen yet" and every
+   real write is always `> 0`. Added a direct unit test in
+   `db/src/storage.rs` (the project's first storage-layer test,
+   previously only `revtree.rs` had unit tests) using sled's
+   `temporary(true)` mode rather than pulling in a `tempfile`
+   dependency for one test. Confirmed it fails against the pre-fix
+   code and passes against the fix.
+
+Full existing suite re-verified: 20 unit tests (up from 19), both
+PouchDB integration tests, all ported cases, attachments, load, and
+the differential test against real CouchDB — all pass. Benchmarks
+re-run and `doc/BENCHMARKS.md` updated (see that file for the date,
+time, and version tested).
+
 ## v0.1.4
 
 **Real bug found live-testing against a real PouchDB app** (offlog-app

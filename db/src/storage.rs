@@ -175,7 +175,18 @@ impl Db {
             .serialize(&stored)
             .map_err(|e| StorageError::Corrupt(format!("failed to encode revtree for {doc_id:?}: {e}")))?;
         self.docs.insert(doc_id, bytes)?;
-        let seq = self.base.generate_id()?;
+        // `generate_id()` starts at 0, but `since=0` means "from the very
+        // start" (no prior checkpoint) — real CouchDB's own convention,
+        // where a seq token is never the same value as the "nothing seen
+        // yet" starting point. `changes_since` correctly treats `since` as
+        // exclusive (`seq > since`), so a raw 0 here would make the very
+        // first document ever written to a fresh database permanently
+        // invisible to any `_changes?since=0` poll — which is what every
+        // fresh `db.sync()` starts with. Shifting by 1 keeps persisted seq
+        // values in 1..=u64::MAX, so 0 is never a real assigned value and
+        // can safely mean only "nothing yet." Found live-testing; see
+        // `doc/changelog.md`.
+        let seq = self.base.generate_id()? + 1;
         self.seq_log.insert(seq.to_be_bytes(), doc_id)?;
         Ok(seq)
     }
@@ -221,3 +232,39 @@ impl Db {
 }
 
 pub type SharedRoot = Arc<sled::Db>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::revtree::RevTree;
+
+    /// Real bug found live-testing against a real PouchDB app: sled's
+    /// `generate_id()` starts at 0, but `_changes?since=0` (what every
+    /// fresh `db.sync()` starts with) means "since the very beginning" —
+    /// `changes_since` correctly treats `since` as exclusive, so a raw
+    /// seq of 0 made the very first document ever written to a fresh
+    /// database permanently invisible to any client doing an initial
+    /// sync. `doc_count` would say 1, `_changes` would say 0 results.
+    /// See `doc/changelog.md`.
+    #[test]
+    fn first_document_ever_written_is_visible_in_changes_since_zero() {
+        // `temporary(true)`: an ephemeral, self-cleaning sled instance —
+        // no real dependency on disk state, and avoids adding a dev-only
+        // crate like `tempfile` just for one test (see doc/MAINTENANCE.md
+        // on keeping the dependency list small).
+        let base = sled::Config::new().temporary(true).open().unwrap();
+        let db = Db::open(&base, "testdb").unwrap();
+
+        let mut tree = RevTree::default();
+        tree.insert_revision_chain(&["1-aaa".to_string()], false, serde_json::json!({"x": 1}));
+        db.put_tree("only-doc", &tree).unwrap();
+
+        let changes = db.changes_since(0).unwrap();
+        assert_eq!(changes.len(), 1, "the first-ever write must be visible to since=0, got: {changes:?}");
+        assert_eq!(changes[0].1, "only-doc");
+
+        // Also confirm no persisted seq is ever the sentinel value 0 —
+        // that's what "since=0" needs to mean exclusively "nothing yet."
+        assert!(changes[0].0 > 0);
+    }
+}

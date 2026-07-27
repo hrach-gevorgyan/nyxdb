@@ -36,22 +36,23 @@ methodology, historical progression, and honest caveats in
 **[doc/BENCHMARKS.md](doc/BENCHMARKS.md)**, re-run and updated after
 every release.
 
-**Last tested: v0.1.4, 2026-07-27.**
+**Last tested: v0.1.5, 2026-07-27 17:56 UTC.**
 
 | | NyxDB | Real CouchDB | Ratio |
 |---|---|---|---|
 | Install size | 4.39 MB | 229 MB | ~52x smaller |
-| Write throughput (5,000 docs, one `_bulk_docs`) | ~16,000 docs/sec | ~3,370 docs/sec | ~4.75x faster |
-| Read throughput (200 sequential `GET`) | 9.47ms/req | 10.16ms/req | ~1.07x faster |
-| Idle memory | 28.2 MB | ~93.5 MB | ~3.3x lighter |
+| Write throughput (5,000 docs, one `_bulk_docs`) | ~16,340 docs/sec | ~3,870 docs/sec | ~4.2x faster |
+| Read throughput (200 sequential `GET`) | 10.66ms/req | 10.79ms/req | ~1.01x faster |
+| Idle memory | 27.8 MB | ~93.5 MB | ~3.4x lighter |
 | Memory after a 5,000-doc write | 35.4 MB | ~116 MB | ~3.3x lighter |
-| Disk size (same 5,000-doc dataset) | 1.83 MB | 1.74 MB | ~1.05x more |
+| Disk size (same 5,000-doc dataset) | 1.84 MB | 1.74 MB | ~1.06x more |
 | Startup time | <20ms | seconds (Erlang/OTP boot) | — |
 | `_changes` in-process notification latency | ~0.14ms | not measured | — |
 
 Write throughput varies noticeably run to run on a shared dev machine
-(this round: 4.75x, a prior release measured 6.5x under lighter load)
-— see [doc/BENCHMARKS.md](doc/BENCHMARKS.md) for the honest caveat.
+(this round: 4.2x; earlier releases measured 4.75x and 6.5x at
+different points in the same long session) — see
+[doc/BENCHMARKS.md](doc/BENCHMARKS.md) for the honest caveat.
 Disk size is the one metric that doesn't outright win, and it's close
 — see that file for what the gap actually costs at real-world scale
 (it's small).
