@@ -32,24 +32,34 @@ today, [changelog.md](changelog.md) for how/why things changed.
 - [x] Differential testing against real CouchDB (`test/differential/`)
       — matches exactly
 
-## Phase 4 — Attachments
+## Phase 4 — Attachments (done)
 - [x] Closed most of a disk-size gap found in benchmarking (3.5x → 1.29x
       vs. CouchDB). Also measured memory against real CouchDB — this
       server is 2-3x lighter, not a gap. Full story in `changelog.md`
       and `BENCHMARKS.md`.
-- [ ] Full project audit (correctness, security, stability) before
-      starting attachments work — see `AUDIT.md`.
-- [ ] Attachments
+- [x] Full project audit (correctness, security, stability) before
+      starting attachments work — see `AUDIT.md`. Found and fixed 5 real
+      issues (non-JSON error bodies in 3 more places, timing-unsafe
+      credential comparison, unrestricted credentials file permissions,
+      no request body size limit, panics on corrupted on-disk data).
+- [x] Attachments: inline base64 (via `PUT`/`_bulk_docs`) and standalone
+      upload/fetch/delete (`GET/PUT/DELETE /{db}/{id}/{attname}`).
+      Content-addressed storage (dedup by digest). Verified against a
+      real PouchDB client's `putAttachment`/`getAttachment` and directly
+      against real CouchDB's response shape. See `USAGE.md` for the
+      endpoints and the (cosmetic) differences from CouchDB's format.
 
 Mango/`_find` proxying and `_session` cookie auth are dropped from
 scope — no concrete need, not planned.
 
-## After Phase 4
+## Next
 - Close every remaining item in `open-questions.md`.
+- Write integration instructions for a real app currently on CouchDB
+  (see `MIGRATING.md`).
 - Start testing against the real target app.
 
 ## Status
-Phases 0–3 done. Verified with a real PouchDB client, load testing, and
-differential testing against real CouchDB. Plaintext HTTP only — keep
-this on a trusted LAN until TLS is decided. Full audit in progress
-before starting Phase 4 — see `AUDIT.md`.
+Phases 0–4 done. Verified with a real PouchDB client, load testing,
+differential testing against real CouchDB, ported PouchDB test cases,
+and a full security/stability audit. Plaintext HTTP only — keep this on
+a trusted LAN until TLS is decided (`open-questions.md`).

@@ -16,10 +16,11 @@
 ## Before a release
 1. Fast tier: unit + in-process integration tests.
 2. Slow tier: `test/differential/` (needs a real CouchDB instance),
-   `test/load/`, `test/benchmark/`.
-3. Check `open-questions.md` for anything that needs resolving first
-   (TLS, CORS).
-4. Update `changelog.md`.
+   `test/load/`, `test/benchmark/`, `test/attachments/`.
+3. Re-run the `AUDIT.md` checklist — don't skip this just because it
+   passed once.
+4. Check `open-questions.md` for anything newly relevant.
+5. Update `changelog.md`.
 
 ## Dependencies
 Keep the list small — the whole premise is a small, auditable protocol

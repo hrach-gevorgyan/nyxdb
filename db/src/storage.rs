@@ -123,6 +123,13 @@ pub struct Db {
     pub docs: sled::Tree,
     pub local: sled::Tree,
     pub seq_log: sled::Tree,
+    /// Attachment bytes, keyed by content digest (`"sha256-<hex>"`) —
+    /// not by doc id/rev/filename. Content-addressed storage means
+    /// identical attachment content is only ever stored once, even if
+    /// referenced by many revisions or documents; document bodies only
+    /// ever hold a small stub (`{"stub":true,"digest":...,"length":...}`)
+    /// pointing here, not the raw bytes. See `crate::attachments`.
+    pub attachments: sled::Tree,
 }
 
 impl Db {
@@ -132,7 +139,23 @@ impl Db {
             docs: base.open_tree(format!("{name}::docs"))?,
             local: base.open_tree(format!("{name}::local"))?,
             seq_log: base.open_tree(format!("{name}::seq"))?,
+            attachments: base.open_tree(format!("{name}::attachments"))?,
         })
+    }
+
+    pub fn get_attachment(&self, digest: &str) -> StorageResult<Option<Vec<u8>>> {
+        Ok(self.attachments.get(digest)?.map(|bytes| bytes.to_vec()))
+    }
+
+    pub fn put_attachment(&self, digest: &str, bytes: &[u8]) -> StorageResult<()> {
+        // Content-addressed: if this exact content is already stored
+        // (same digest), skip the write entirely rather than overwrite
+        // with identical bytes.
+        if self.attachments.contains_key(digest)? {
+            return Ok(());
+        }
+        self.attachments.insert(digest, bytes)?;
+        Ok(())
     }
 
     pub fn get_tree(&self, doc_id: &str) -> StorageResult<Option<RevTree>> {

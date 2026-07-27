@@ -13,12 +13,23 @@ use axum::{
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::fmt;
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Credentials {
     pub username: String,
     pub password: String,
+}
+
+/// Manual `Debug` impl that never prints the password — not exploited
+/// anywhere today (nothing logs `Credentials`/`AppState` via `{:?}`),
+/// but a derived `Debug` is a standing invitation for a future debug
+/// log line to leak it. Found in the project audit, `doc/AUDIT.md`.
+impl fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Credentials").field("username", &self.username).field("password", &"<redacted>").finish()
+    }
 }
 
 impl Credentials {

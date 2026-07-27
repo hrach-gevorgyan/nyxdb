@@ -5,7 +5,9 @@ the subset of CouchDB's replication protocol that a real PouchDB client
 uses — not a full CouchDB replacement.
 
 - **[doc/USAGE.md](doc/USAGE.md)** — how to run it, every endpoint, config, and where it differs from real CouchDB. Start here.
+- **[doc/MIGRATING.md](doc/MIGRATING.md)** — point an existing PouchDB app (currently on CouchDB) at this server instead.
 - **[doc/BENCHMARKS.md](doc/BENCHMARKS.md)** — speed, size, and memory vs. real CouchDB.
+- **[doc/AUDIT.md](doc/AUDIT.md)** — security/stability audit process and findings.
 - **[doc/roadmap.md](doc/roadmap.md)** — what's done, what's not.
 - **[doc/changelog.md](doc/changelog.md)** — history of what changed and why.
 

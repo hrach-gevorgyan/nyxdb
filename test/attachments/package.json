@@ -1,0 +1,8 @@
+{
+  "name": "couchdb-clone-attachment-tests",
+  "private": true,
+  "version": "0.1.0",
+  "dependencies": {
+    "pouchdb": "^8.0.1"
+  }
+}

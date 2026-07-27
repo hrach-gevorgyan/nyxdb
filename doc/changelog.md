@@ -148,3 +148,49 @@ relying only on our own hand-written cases:
   Verified: oversized bodies correctly rejected with a JSON error, full
   regression suite (19 unit tests, integration, differential, load,
   ported tests) still passes.
+- Fixed the remaining audit "review" items instead of leaving them
+  open: `prod/Dockerfile` now creates and runs as a dedicated non-root
+  user; `Credentials` no longer derives `Debug` (manual impl redacts
+  the password).
+- Closed every item in `open-questions.md` — most by deciding and
+  documenting the reasoning (plaintext HTTP is deliberate for a
+  trusted-LAN deployment; rate limiting and connection caps aren't
+  needed for that same model), a few by the fixes above.
+
+**Phase 4 — Attachments.** Two ways to attach a file, matching what a
+real PouchDB client actually sends:
+- Inline base64 in the document body (`_attachments.<name>.data`),
+  supported on `PUT`, `_bulk_docs`, and `new_edits:false`. Extracted on
+  write into a stub (`{"content_type","digest","length","stub":true}`)
+  plus separately-stored bytes — keeps the revision-tree storage small
+  regardless of attachment size. `GET` returns stubs by default,
+  `?attachments=true` re-inflates them to inline base64.
+- Standalone `GET/PUT/DELETE /{db}/{id}/{attname}` — raw bytes in/out,
+  `Content-Type` from the request/response header, not JSON-wrapped.
+- Storage is content-addressed by digest (`db/src/attachments.rs`,
+  new `attachments` sled tree per db) — identical attachment content is
+  only ever stored once, even across documents or revisions.
+- Verified three ways: our own HTTP-level tests (`test/attachments/`),
+  a real PouchDB client's `putAttachment`/`getAttachment` methods (same
+  file), and a direct comparison against real CouchDB's actual response
+  shape — matches when the client sends `Accept: application/json`
+  (which PouchDB always does). Two cosmetic differences found and
+  documented, not fixed: digests use SHA-256 not CouchDB's MD5 (same
+  reasoning as the revision-hash difference), and stubs omit `revpos`.
+  No `multipart/related` support — inline JSON only.
+- Mango/`_find` proxying and `_session` cookie auth, the other two
+  originally-listed Phase 4 candidates, dropped from scope entirely —
+  no concrete need arose.
+
+Added `doc/MIGRATING.md`: instructions for pointing an existing
+PouchDB app (currently synced against real CouchDB) at this server —
+compatibility checklist, deployment steps, data migration via normal
+replication (no separate migration tooling needed, since each device's
+local PouchDB already has a full copy), a test-before-cutover
+checklist, and a rollback note (switching the remote URL back is the
+entire rollback).
+
+This closes out the full arc from `doc/roadmap.md`: Phases 0 through 4
+all complete, verified by unit tests, a real PouchDB client, load
+testing, differential testing against real CouchDB, ported PouchDB
+test cases, and a full security/stability audit.

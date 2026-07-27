@@ -6,10 +6,12 @@ RUN cargo build --release --manifest-path db/Cargo.toml
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --home-dir /data --shell /usr/sbin/nologin couchdb-clone
 COPY --from=builder /app/target/release/couchdb-clone /usr/local/bin/couchdb-clone
 ENV COUCHDB_CLONE_ADDR=0.0.0.0:5984
 ENV COUCHDB_CLONE_DATA=/data
 VOLUME ["/data"]
 EXPOSE 5984
+USER couchdb-clone
 ENTRYPOINT ["/usr/local/bin/couchdb-clone"]

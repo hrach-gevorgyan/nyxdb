@@ -11,6 +11,8 @@
 - `benchmark/` — speed/size/memory comparison against real CouchDB.
 - `ported/` — test cases ported from PouchDB's own test suite
   (conflict resolution, idempotent replay, edge-case doc ids).
+- `attachments/` — inline + standalone attachment endpoints, plus a
+  real PouchDB client's `putAttachment`/`getAttachment`.
 
 Rust unit tests live in `db/src/*.rs` (`#[cfg(test)]`), not here.
 
@@ -37,4 +39,7 @@ COUCH_USER=admin COUCH_PASSWORD=yourpass node test/benchmark/vs_couchdb.js
 
 # Ported PouchDB test cases
 node test/ported/pouchdb_tests.js
+
+# Attachments
+node test/attachments/run.js
 ```

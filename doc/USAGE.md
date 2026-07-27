@@ -10,14 +10,14 @@ the code, trust the code — check `db/src/routes.rs`.
 
 A Rust server implementing the part of CouchDB's HTTP replication
 protocol that a real PouchDB client (`db.sync()`, `db.replicate.to/from()`)
-actually uses. Not a full CouchDB replacement — no Mango queries, no
-MapReduce views, no attachments, no clustering.
+actually uses, plus attachments. Not a full CouchDB replacement — no
+Mango queries, no MapReduce views, no clustering.
 
 See [roadmap.md](roadmap.md) for what's done and [changelog.md](changelog.md)
 for why decisions were made.
 
-**Status**: Phases 0–3 done (spike, revision trees, live replication,
-hardening). Verified with a real PouchDB client, a load test, and a
+**Status**: Phases 0–4 done (spike, revision trees, live replication,
+hardening, attachments). Verified with a real PouchDB client, a load test, and a
 differential test against real CouchDB 3.5.2 — see §5.
 
 ## 2. Running it
@@ -121,6 +121,45 @@ No optimistic concurrency control here — a `PUT` always succeeds even
 if you didn't send the current `_rev`. Use `new_edits:false` if you
 need real conflict detection.
 
+### Attachments
+
+Two ways to attach a file, both supported:
+
+**Inline base64**, embedded in the document body (works with `PUT`,
+`_bulk_docs`, and `new_edits:false`):
+
+```bash
+curl -u user:pass -X PUT http://127.0.0.1:5984/mydb/doc1 \
+  -H "Content-Type: application/json" \
+  -d '{"title":"has a file","_attachments":{"note.txt":{"content_type":"text/plain","data":"aGVsbG8="}}}'
+```
+
+A plain `GET` on the doc returns the attachment as a **stub**
+(`{"content_type":...,"digest":...,"length":...,"stub":true}`), not
+the data. Add `?attachments=true` to get the data back inline.
+
+**Standalone upload** — `PUT /{db}/{id}/{attname}` with the raw bytes
+as the body (not JSON), `Content-Type` set to the file's real MIME type:
+
+```bash
+curl -u user:pass -X PUT http://127.0.0.1:5984/mydb/doc1/note.txt \
+  -H "Content-Type: text/plain" --data-binary @note.txt
+```
+
+`GET /{db}/{id}/{attname}` fetches the raw bytes back with that
+`Content-Type`. `DELETE /{db}/{id}/{attname}` removes it (the doc's
+other fields and other attachments are untouched).
+
+Attachment bytes are stored once per unique content (content-addressed
+by digest), even if referenced by multiple documents or revisions.
+
+*Difference from real CouchDB*: digests use SHA-256 (`"sha256-<hex>"`),
+not CouchDB's MD5 (`"md5-<base64>"`) — same reasoning as the revision
+hash difference above. Stubs also don't include `revpos` (the
+generation an attachment was added at) — cosmetic, doesn't affect sync.
+No `multipart/related` support — only inline JSON, which is what a
+PouchDB client sends by default.
+
 ### `POST /{db}/_bulk_docs`
 Batch write. Two modes:
 
@@ -219,18 +258,21 @@ Not implemented: `filter`, `doc_ids`, `heartbeat` (matters if you put
 this behind a reverse proxy that kills idle connections).
 
 ### Not implemented at all
-`_all_dbs`, `_ensure_full_commit`, `_session`, `_security`, attachments,
-Mango (`_find`), views, `_replicate`, clustering, compaction. Out of
-scope unless a real need shows up (see roadmap.md, Phase 4).
+`_all_dbs`, `_ensure_full_commit`, `_session`, `_security`, Mango
+(`_find`), views, `_replicate`, clustering, compaction,
+`multipart/related` attachments. Dropped from scope, not planned —
+see `roadmap.md`.
 
 ## 5. How we know it works
 
 | Method | Checks | Where |
 |---|---|---|
-| Unit tests (14) | Winner-picking, conflicts, deletion/recreation, `_revs_diff` | `db/src/revtree.rs` |
+| Unit tests (19) | Winner-picking, conflicts, deletion/recreation, `_revs_diff` | `db/src/revtree.rs` |
 | Real PouchDB client | One-shot and `live:true` two-device sync | `test/integration/` |
 | Differential vs. real CouchDB | Winner rev, `_conflicts`, `_changes`, `_revs_diff` diffed against a live CouchDB | `test/differential/` |
 | Load/soak | Large batch writes + many concurrent `feed=continuous` subscribers | `test/load/` |
+| Ported PouchDB test cases | Real edge cases from PouchDB's own test suite | `test/ported/` |
+| Attachments | Inline + standalone endpoints, plus a real PouchDB client's `putAttachment`/`getAttachment` | `test/attachments/` |
 
 The differential test matched real CouchDB 3.5.2 exactly on the first
 run for a tree with a conflict, a resolution, a deletion, and a
@@ -262,8 +304,10 @@ Reproduce with `test/benchmark/`, `test/load/` (scale via
 4. **`_changes` sequence tokens are plain integers**, not portable
    between servers.
 5. **No heartbeat on `feed=continuous`.**
-6. **No attachments, Mango, views, `_security`, `_session`, clustering,
-   or server-triggered replication.**
-7. **Plaintext HTTP only** — fine on a trusted LAN, not for anything
+6. **Attachment digests use SHA-256, not CouchDB's MD5**; stubs don't
+   include `revpos`. No `multipart/related` support — inline JSON only.
+7. **No Mango, views, `_security`, `_session`, clustering, or
+   server-triggered replication.**
+8. **Plaintext HTTP only** — fine on a trusted LAN, not for anything
    internet-reachable.
-8. **Single-node only** — sled is embedded, no clustering.
+9. **Single-node only** — sled is embedded, no clustering.

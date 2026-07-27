@@ -58,6 +58,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(server_info))
         .route("/:db", put(create_db).get(db_info).delete(delete_db))
         .route("/:db/:id", get(get_doc).put(put_doc))
+        .route("/:db/:id/:attname", get(get_attachment).put(put_attachment).delete(delete_attachment))
         .route("/:db/_bulk_docs", post(bulk_docs))
         .route("/:db/_revs_diff", post(revs_diff))
         .route("/:db/_bulk_get", post(bulk_get))
@@ -150,7 +151,7 @@ async fn delete_db(
     if !existed {
         return Err(not_found());
     }
-    for suffix in ["docs", "local", "seq"] {
+    for suffix in ["docs", "local", "seq", "attachments"] {
         state.root.drop_tree(format!("{db_name}::{suffix}")).map_err(|_| internal_error())?;
     }
     Ok(Json(json!({"ok": true})))
@@ -160,6 +161,8 @@ async fn delete_db(
 struct GetDocParams {
     #[serde(default)]
     conflicts: bool,
+    #[serde(default)]
+    attachments: bool,
 }
 
 async fn get_doc(
@@ -184,15 +187,104 @@ async fn get_doc(
             body["_conflicts"] = json!(conflicts);
         }
     }
+    if params.attachments {
+        crate::attachments::inflate_attachments(&db, &mut body);
+    }
     Ok(Json(body))
 }
 
 async fn put_doc(
     State(state): State<AppState>,
     Path((db_name, id)): Path<(String, String)>,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    crate::attachments::extract_inline_attachments(&db, &mut body)
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "bad_request", "invalid attachment data"))?;
+    let feed = state.feeds.get_or_create(&db_name);
+    let rev = write_doc(&db, &feed, &id, body).map_err(|_| internal_error())?;
+    Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
+}
+
+/// `GET /{db}/{id}/{attname}` — fetch a single attachment's raw bytes
+/// (not wrapped in JSON), with its stored `Content-Type`.
+async fn get_attachment(
+    State(state): State<AppState>,
+    Path((db_name, id, attname)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let tree = db.get_tree(&id).map_err(|_| internal_error())?.ok_or_else(not_found)?;
+    let winner = tree.winner().ok_or_else(not_found)?;
+    let node = &tree.nodes[winner];
+    if node.deleted {
+        return Err(deleted());
+    }
+    let stub = node.body.get("_attachments").and_then(|a| a.get(&attname)).ok_or_else(not_found)?;
+    let digest = stub.get("digest").and_then(Value::as_str).ok_or_else(internal_error)?;
+    let content_type =
+        stub.get("content_type").and_then(Value::as_str).unwrap_or("application/octet-stream").to_string();
+    let bytes = db.get_attachment(digest).map_err(|_| internal_error())?.ok_or_else(not_found)?;
+    Response::builder().header(header::CONTENT_TYPE, content_type).body(Body::from(bytes)).map_err(|_| internal_error())
+}
+
+/// `PUT /{db}/{id}/{attname}` — upload a single attachment directly:
+/// the request body is the raw attachment bytes (not JSON), with
+/// `Content-Type` giving its MIME type. Builds on the doc's current
+/// winning revision, same last-write-wins semantics as `PUT /{db}/{id}`
+/// (see the "no optimistic concurrency control" gap in `doc/USAGE.md` §7
+/// — this endpoint doesn't enforce `?rev=` matching the current winner
+/// either, for the same reason).
+async fn put_attachment(
+    State(state): State<AppState>,
+    Path((db_name, id, attname)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let mut doc_body = match db.get_tree(&id).map_err(|_| internal_error())? {
+        Some(tree) => match tree.winner() {
+            Some(winner) if !tree.nodes[winner].deleted => tree.nodes[winner].body.clone(),
+            _ => json!({}),
+        },
+        None => json!({}),
+    };
+    let digest = crate::attachments::store_raw_attachment(&db, &body).map_err(|_| internal_error())?;
+    if doc_body.get("_attachments").is_none() {
+        doc_body["_attachments"] = json!({});
+    }
+    doc_body["_attachments"][&attname] =
+        json!({"content_type": content_type, "digest": digest, "length": body.len(), "stub": true});
+
+    let feed = state.feeds.get_or_create(&db_name);
+    let rev = write_doc(&db, &feed, &id, doc_body).map_err(|_| internal_error())?;
+    Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
+}
+
+/// `DELETE /{db}/{id}/{attname}` — remove a single attachment, creating
+/// a new revision without it. The attachment's bytes stay in storage
+/// (content-addressed, might be referenced by an earlier revision still
+/// in the tree) — only the current body's reference to it is removed.
+async fn delete_attachment(
+    State(state): State<AppState>,
+    Path((db_name, id, attname)): Path<(String, String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let tree = db.get_tree(&id).map_err(|_| internal_error())?.ok_or_else(not_found)?;
+    let winner = tree.winner().ok_or_else(not_found)?;
+    if tree.nodes[winner].deleted {
+        return Err(deleted());
+    }
+    let mut body = tree.nodes[winner].body.clone();
+    let removed = body.get_mut("_attachments").and_then(Value::as_object_mut).and_then(|obj| obj.remove(&attname));
+    if removed.is_none() {
+        return Err(not_found());
+    }
     let feed = state.feeds.get_or_create(&db_name);
     let rev = write_doc(&db, &feed, &id, body).map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
@@ -268,6 +360,11 @@ fn bulk_docs_new_edits_true(db: &Db, feed: &ChangeFeed, docs: &[Value]) -> Resul
             obj.remove("_rev");
         }
 
+        if let Err(_reason) = crate::attachments::extract_inline_attachments(db, &mut doc) {
+            results.push(json!({"id": id, "error": "bad_request", "reason": "invalid attachment data"}));
+            continue;
+        }
+
         match write_doc(db, feed, &id, doc) {
             Ok(rev) => results.push(json!({"ok": true, "id": id, "rev": rev})),
             Err(_) => results.push(json!({
@@ -301,6 +398,10 @@ fn bulk_docs_new_edits_false(db: &Db, feed: &ChangeFeed, docs: &[Value]) -> Resu
             obj.remove("_rev");
             obj.remove("_revisions");
             obj.remove("_deleted");
+        }
+        if let Err(_reason) = crate::attachments::extract_inline_attachments(db, &mut body) {
+            errors.push(json!({"id": id, "error": "bad_request", "reason": "invalid attachment data"}));
+            continue;
         }
 
         let write = || -> StorageResult<u64> {
