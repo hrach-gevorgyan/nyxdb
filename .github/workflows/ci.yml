@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      NYXDB_USER: ci
+      NYXDB_PASSWORD: ci-test-password
+      SERVER_URL: http://127.0.0.1:8085
+      TEST_USER: ci
+      TEST_PASSWORD: ci-test-password
+      OUR_USER: ci
+      OUR_PASSWORD: ci-test-password
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build (release)
+        run: cargo build --release --manifest-path db/Cargo.toml
+
+      - name: Unit tests
+        run: cargo test --release --manifest-path db/Cargo.toml
+
+      - name: Start server for HTTP-level tests
+        run: |
+          NYXDB_DATA=./data-ci NYXDB_ADDR=127.0.0.1:8085 ./target/release/nyxdb &
+          for i in $(seq 1 50); do
+            curl -sf http://127.0.0.1:8085/ > /dev/null && break
+            sleep 0.1
+          done
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Integration tests (real PouchDB client)
+        run: |
+          npm install --prefix test/integration
+          node test/integration/run.js
+          node test/integration/live_sync.js
+
+      - name: Ported PouchDB test cases
+        run: node test/ported/pouchdb_tests.js
+
+      - name: Attachment tests
+        run: |
+          npm install --prefix test/attachments
+          node test/attachments/run.js
+
+      - name: Load/soak test
+        run: node test/load/run.js
+
+    # Differential and benchmark tests need a real CouchDB instance and
+    # aren't run in CI — they're for local verification against a real
+    # server (see test/README.md), not regression-gating every push.
