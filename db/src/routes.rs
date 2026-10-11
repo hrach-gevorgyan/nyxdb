@@ -3,7 +3,7 @@
 //! revision-tree conflict handling wired up yet — last-write-wins.
 
 use crate::changes::{ChangeEvent, ChangeFeed, ChangeFeedRegistry};
-use crate::revtree::{RevNode, RevTree};
+use crate::revtree::{RevId, RevNode, RevTree};
 use crate::storage::{Db, StorageResult, WriteLocks};
 use axum::{
     body::{to_bytes, Body, Bytes},
@@ -205,6 +205,26 @@ struct GetDocParams {
     latest: bool,
     /// `all`, or a JSON array of rev ids.
     open_revs: Option<String>,
+    /// A specific revision instead of the winner.
+    rev: Option<String>,
+}
+
+/// Picks the revision a single-doc read is about: `rev` if given (404
+/// `missing` if it isn't stored — a pulling PouchDB asks for each branch
+/// by rev, and must never silently get another branch's content), else
+/// the winner (404 `deleted` if the winner is a tombstone).
+fn resolve_rev<'t>(tree: &'t RevTree, rev: Option<&str>) -> Result<(&'t RevId, &'t RevNode), ApiError> {
+    match rev {
+        Some(rev) => tree.nodes.get_key_value(rev).ok_or_else(not_found),
+        None => {
+            let winner = tree.winner().ok_or_else(not_found)?;
+            let node = &tree.nodes[winner];
+            if node.deleted {
+                return Err(deleted());
+            }
+            Ok((winner, node))
+        }
+    }
 }
 
 async fn get_doc(
@@ -218,11 +238,7 @@ async fn get_doc(
     if let Some(open_revs) = params.open_revs.as_deref() {
         return open_revs_response(&db, &tree, &id, open_revs, &params).map(Json);
     }
-    let winner = tree.winner().ok_or_else(not_found)?;
-    let node = &tree.nodes[winner];
-    if node.deleted {
-        return Err(deleted());
-    }
+    let (winner, node) = resolve_rev(&tree, params.rev.as_deref())?;
     let mut body = revision_body(&tree, &id, winner, node, params.revs);
     if params.revs_info {
         let info: Vec<Value> = tree
@@ -342,19 +358,23 @@ async fn put_doc(
     Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
 }
 
+#[derive(serde::Deserialize)]
+struct AttachmentParams {
+    rev: Option<String>,
+}
+
 /// `GET /{db}/{id}/{attname}` — fetch a single attachment's raw bytes
-/// (not wrapped in JSON), with its stored `Content-Type`.
+/// (not wrapped in JSON), with its stored `Content-Type`. `?rev=` picks
+/// the branch: a pulling PouchDB fetches each conflicting branch's
+/// attachments by that branch's rev.
 async fn get_attachment(
     State(state): State<AppState>,
     Path((db_name, id, attname)): Path<(String, String, String)>,
+    Query(params): Query<AttachmentParams>,
 ) -> Result<Response, ApiError> {
     let db = state.db(&db_name)?;
     let tree = db.get_tree(&id).map_err(|_| internal_error())?.ok_or_else(not_found)?;
-    let winner = tree.winner().ok_or_else(not_found)?;
-    let node = &tree.nodes[winner];
-    if node.deleted {
-        return Err(deleted());
-    }
+    let (_, node) = resolve_rev(&tree, params.rev.as_deref())?;
     let stub = node.body.get("_attachments").and_then(|a| a.get(&attname)).ok_or_else(not_found)?;
     let digest = stub.get("digest").and_then(Value::as_str).ok_or_else(internal_error)?;
     let content_type =

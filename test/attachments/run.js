@@ -148,11 +148,96 @@ async function testRealPouchDBClient() {
   await remote.destroy();
 }
 
+// Conflicting branches carrying different bytes under the same attachment
+// name (see doc/changelog.md, v0.1.7). A pulling PouchDB fetches each
+// attachment with `GET /db/doc/att?rev=<that branch's rev>`; if `rev` is
+// ignored, the losing branch either 404s (and the batch retries forever)
+// or silently gets the winner's bytes.
+async function testConflictingBranchAttachments() {
+  const db = "att_conflict_" + Date.now();
+  await req(db, "PUT", "");
+  const b64 = (s) => Buffer.from(s).toString("base64");
+  const push = (h, text) =>
+    req(
+      db,
+      "PUT",
+      "/doc?new_edits=false",
+      JSON.stringify({
+        _id: "doc",
+        _rev: `2-${h}`,
+        _revisions: { start: 2, ids: [h, "root"] },
+        branch: h,
+        _attachments: { "f.txt": { content_type: "text/plain", data: b64(text) } },
+      }),
+      { "Content-Type": "application/json" }
+    );
+  await req(db, "PUT", "/doc?new_edits=false", JSON.stringify({ _id: "doc", _rev: "1-root", v: 0 }), {
+    "Content-Type": "application/json",
+  });
+  await push("aaaa", "bytes of branch A");
+  await push("bbbb", "bytes of branch B"); // winner: same generation, higher hash
+
+  const losingDoc = await req(db, "GET", "/doc?rev=2-aaaa");
+  check(
+    "GET /db/doc?rev=<losing rev> returns that revision, not the winner",
+    losingDoc.status === 200 && losingDoc.body._rev === "2-aaaa" && losingDoc.body.branch === "aaaa",
+    JSON.stringify(losingDoc.body)
+  );
+  const losingAtt = await req(db, "GET", "/doc/f.txt?rev=2-aaaa");
+  check(
+    "GET /db/doc/att?rev=<losing rev> returns that branch's bytes",
+    losingAtt.status === 200 && losingAtt.body === "bytes of branch A",
+    `${losingAtt.status} ${JSON.stringify(losingAtt.body)}`
+  );
+  const winningAtt = await req(db, "GET", "/doc/f.txt?rev=2-bbbb");
+  check(
+    "GET /db/doc/att?rev=<winning rev> returns the winner's bytes",
+    winningAtt.status === 200 && winningAtt.body === "bytes of branch B",
+    `${winningAtt.status} ${JSON.stringify(winningAtt.body)}`
+  );
+  const unknownDoc = await req(db, "GET", "/doc?rev=9-nope");
+  const unknownAtt = await req(db, "GET", "/doc/f.txt?rev=9-nope");
+  check(
+    "an unknown ?rev= is 404 missing on both the doc and the attachment",
+    unknownDoc.status === 404 &&
+      unknownDoc.body.reason === "missing" &&
+      unknownAtt.status === 404 &&
+      unknownAtt.body.reason === "missing",
+    `${JSON.stringify(unknownDoc.body)} ${JSON.stringify(unknownAtt.body)}`
+  );
+
+  // The real case: replicate both branches into a second PouchDB.
+  const remote = new PouchDB(`${SERVER_URL}/${db}`, { auth: { username: OUR_USER, password: OUR_PASSWORD } });
+  const local = new PouchDB("att_conflict_local_" + Date.now());
+  try {
+    const replication = PouchDB.replicate(remote, local);
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("replication timed out")), 20000));
+    await Promise.race([replication, timeout]);
+    const readBranch = async (rev) => {
+      const d = await local.get("doc", { rev, attachments: true });
+      return Buffer.from(d._attachments["f.txt"].data, "base64").toString();
+    };
+    const a = await readBranch("2-aaaa");
+    const b = await readBranch("2-bbbb");
+    check(
+      "a replicated PouchDB gets each conflicting branch's own attachment bytes",
+      a === "bytes of branch A" && b === "bytes of branch B",
+      `A=${JSON.stringify(a)} B=${JSON.stringify(b)}`
+    );
+  } catch (err) {
+    check("a replicated PouchDB gets each conflicting branch's own attachment bytes", false, err.message);
+  } finally {
+    await local.destroy();
+    await req(db, "DELETE", "");
+  }
+}
+
 async function main() {
   await testInlineAttachment();
   await testStandaloneUploadAndDelete();
   await testMalformedAttachmentRejected();
   await testRealPouchDBClient();
+  await testConflictingBranchAttachments();
 
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);

@@ -63,6 +63,16 @@ isn't covered by an automated test (Windows console signals can't be
 sent to a background child process); a hard kill is the case that
 matters for Offlog and is what the test exercises.
 
+**4. Attachment reads ignored `?rev=` (high).** `GET /db/doc/att` and
+`GET /db/doc` always used the winner. A pulling PouchDB fetches each
+attachment with the rev of the branch it belongs to, so a losing
+branch's attachment either 404'd (and the batch retried forever) or
+got the winner's bytes. Reproduced: two conflicting branches with
+different bytes under the same name, replicated into a second PouchDB —
+both branches ended up with the winner's bytes. Both routes now honour
+`rev`, with `404 missing` for an unknown one. Test: added to
+`test/attachments/run.js`.
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a

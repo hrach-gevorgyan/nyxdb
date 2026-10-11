@@ -127,8 +127,9 @@ curl -u user:pass -G "http://127.0.0.1:5984/mydb/doc1" \
 # [{"ok":{"_id":"doc1","_rev":"2-b", ...}},{"missing":"9-nope"}]
 ```
 
-Not implemented: `?rev=<specific>` (use `?open_revs=["<rev>"]` or
-`_bulk_get`).
+`?rev=<rev>` returns that specific revision instead of the winner
+(tombstones included, with `_deleted:true`); `404 {"reason":"missing"}`
+if it isn't stored.
 
 Known gap: ancestors that arrived only as part of a pushed `_revisions`
 chain (never as a document body) are stored as empty placeholders, so
@@ -193,7 +194,9 @@ curl -u user:pass -X PUT http://127.0.0.1:5984/mydb/doc1/note.txt \
 ```
 
 `GET /{db}/{id}/{attname}` fetches the raw bytes back with that
-`Content-Type`. `DELETE /{db}/{id}/{attname}` removes it (the doc's
+`Content-Type`. Add `?rev=<rev>` to read a specific branch's attachment
+— a pulling PouchDB does exactly that for each conflicting branch — or
+get `404 missing` if that rev isn't stored. `DELETE /{db}/{id}/{attname}` removes it (the doc's
 other fields and other attachments are untouched).
 
 Attachment bytes are stored once per unique content (content-addressed
