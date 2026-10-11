@@ -35,6 +35,12 @@ protocol surface this server implements. But confirm before switching:
   or embeds credentials in the URL, you're already using HTTP Basic and
   this is a non-issue.
 
+- **Does your app push many large attachments per batch?** One request
+  must fit under `NYXDB_MAX_BODY_BYTES` (256 MB by default). PouchDB
+  sends 100 docs per `_bulk_docs` with attachments inline as base64, so
+  for attachment-heavy data lower the replication `batch_size` (or raise
+  the limit) — see [USAGE.md §3](USAGE.md#3-configuration).
+
 If none of those apply, you're good — this is the common case per
 CouchDB's own replication protocol design.
 

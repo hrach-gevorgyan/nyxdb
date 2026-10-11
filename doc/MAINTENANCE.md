@@ -3,7 +3,9 @@
 ## Repo layout
 - `doc/` — start with [USAGE.md](USAGE.md).
 - `db/` — the Rust server.
-- `test/` — unit, integration, differential, load, and benchmark tests.
+- `db/src/routes/` — one module per area of the HTTP API.
+- `test/` — HTTP-level suites, `run_all.js` (the full regression), and
+  `lib/harness.js` (shared helpers). Unit tests live in `db/src`.
 - `prod/` — Dockerfile and deployment config.
 
 ## Day-to-day
@@ -14,9 +16,10 @@
   picking a default.
 
 ## Before a release
-1. Fast tier: unit + in-process integration tests.
-2. Slow tier: `test/differential/` (needs a real CouchDB instance),
-   `test/load/`, `test/benchmark/`, `test/attachments/`.
+1. `node test/run_all.js` — build with zero warnings, clippy, unit
+   tests, every suite, PouchDB 8 and 9. Must exit 0.
+2. Needs a real CouchDB: `test/differential/` and
+   `test/benchmark/vs_couchdb.js` (update `BENCHMARKS.md`).
 3. Re-run the `AUDIT.md` checklist — don't skip this just because it
    passed once.
 4. Check `open-questions.md` for anything newly relevant.

@@ -49,17 +49,25 @@ today, [changelog.md](changelog.md) for how/why things changed.
       against real CouchDB's response shape. See `USAGE.md` for the
       endpoints and the (cosmetic) differences from CouchDB's format.
 
+## Phase 5 — Review fixes (done, v0.1.7)
+- [x] A full review's CRITICAL/HIGH/MEDIUM/LOW list: concurrent-write
+      branch loss, `_changes` skips, durability (flush before ack, atomic
+      tree + seq), `?rev=` reads, bounded growth, md5 digests, persisted
+      server id, longpoll races, startup/memory/blocking, body limit,
+      write/read surface (`DELETE`, `_all_docs`, `_design/…`), attachment
+      compaction, request limits. Each one test-first; see `changelog.md`.
+- [x] Integration suite runs on PouchDB 8.0.1 and 9.x.
+
 Mango/`_find` proxying and `_session` cookie auth are dropped from
 scope — no concrete need, not planned.
 
 ## Next
-- Close every remaining item in `open-questions.md`.
-- Write integration instructions for a real app currently on CouchDB
-  (see `MIGRATING.md`).
-- Start testing against the real target app.
+- Move attachment bytes out of sled (its cache cap doesn't bound ~1 MB
+  values; see `USAGE.md` §3) — an open option, not started.
+- Keep testing against the real target app (Offlog).
 
 ## Status
-Phases 0–4 done. Verified with a real PouchDB client, load testing,
+Phases 0–5 done. Verified with a real PouchDB client, load testing,
 differential testing against real CouchDB, ported PouchDB test cases,
 and a full security/stability audit. Plaintext HTTP only — keep this on
 a trusted LAN until TLS is decided (`open-questions.md`).

@@ -2,7 +2,7 @@
 
 How to run this server, every endpoint it implements, its config, and
 where it differs from real CouchDB. If something here disagrees with
-the code, trust the code — check `db/src/routes.rs`.
+the code, trust the code — check `db/src/routes/` (`build_router` in `mod.rs` has the route table).
 
 ---
 

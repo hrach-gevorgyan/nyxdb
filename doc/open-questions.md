@@ -13,17 +13,20 @@ All resolved. Kept as a record of the decision and reasoning, since
       scope to the replication protocol, not transport security.
 - [x] **CORS** — off by default, opt-in per-origin via
       `NYXDB_CORS_ORIGINS`, no wildcard. `db/src/main.rs::cors_layer`.
-- [x] **Rate limiting** on `_bulk_docs` — resolved: not needed for the
-      trusted-LAN deployment model above. Revisit if this is ever
-      exposed beyond a trusted network.
+- [x] **Rate limiting** on `_bulk_docs` — resolved: no per-client rate
+      limit (trusted LAN). Since v0.1.7 there is a cap on requests in
+      progress (`NYXDB_MAX_CONCURRENT_REQUESTS`) and a request timeout
+      (`NYXDB_REQUEST_TIMEOUT_SECS`).
 - [x] **Credentials** — random per-install, or pinned via
       `NYXDB_USER`/`NYXDB_PASSWORD`. Required on every
       route except `GET /`. `db/src/auth.rs`.
-- [x] **Request body size limit** — `DefaultBodyLimit`, 50MB default,
-      override via `NYXDB_MAX_BODY_BYTES`.
+- [x] **Request body size limit** — `DefaultBodyLimit`, 256 MB default
+      since v0.1.7 (fits one maximal Offlog doc), override via
+      `NYXDB_MAX_BODY_BYTES`; over-limit is `413 too_large`.
 - [x] **Cap on concurrent `feed=continuous` connections** — resolved:
-      not needed for the trusted-LAN deployment model. Verified correct
-      (not just fast) up to 80 concurrent in load testing.
+      not needed for the trusted-LAN deployment model (`_changes` is
+      exempt from the request cap above). Verified correct (not just
+      fast) up to 80 concurrent in load testing.
 - [x] **Docker image running as root** — fixed: `prod/Dockerfile` now
       creates and runs as a dedicated non-root user.
 - [x] **`Credentials` deriving `Debug`** — fixed: manual `Debug` impl
@@ -32,8 +35,9 @@ All resolved. Kept as a record of the decision and reasoning, since
 ## Architecture
 - [x] `axum` vs `actix-web` — decided: axum. No reason found to revisit.
 - [x] `sled` vs `rusqlite` — decided: sled, for embedded simplicity.
-      Revisit only if sled's transactional guarantees become a real
-      pain point in practice (none found so far).
+      Since v0.1.7 a doc's tree and its `_changes` entry are written in
+      one sled transaction. Known limit: sled 0.34's cache cap doesn't
+      bound large values (attachments); see `roadmap.md` Next.
 - [x] Hash function for revision ids — decided: SHA-256 truncated.
       Byte-for-byte CouchDB compatibility was never a goal (see
       `USAGE.md` §7) — `new_edits:false` pushes carry the client's own

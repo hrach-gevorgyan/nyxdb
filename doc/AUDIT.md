@@ -84,7 +84,8 @@ Phase 4.
 1. **No request body size limit.** A client could send an arbitrarily
    large body, or an unbounded `_bulk_docs` batch, fully buffered into
    memory before parsing. Fixed with `axum::extract::DefaultBodyLimit`,
-   defaulting to 50MB (generous for a large sync batch, not unbounded),
+   defaulting to 50MB (generous for a large sync batch, not unbounded;
+   raised to 256 MB in v0.1.7 — see `changelog.md`),
    configurable via `NYXDB_MAX_BODY_BYTES`. Verified: an
    oversized body gets `413` with a proper JSON error (via the
    normalize-error-body fix above); normal requests are unaffected.
