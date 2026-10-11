@@ -244,6 +244,23 @@ Test: `test/write_semantics/run.js` (all 9 checks fail before the fix).
 
 Test: `test/read_surface/run.js` (all 7 checks fail before the fix).
 
+**LOW: storage errors in `_changes`; attachment garbage collection.**
+
+- `_changes` silently dropped a row whose stored tree couldn't be read,
+  and the client's checkpoint then moved past that change for good. Now
+  the normal/longpoll response is a 500 and a continuous feed ends before
+  the row (the client reconnects from the last seq it got); the error is
+  logged. Unit test: `changes_reports_an_unreadable_doc_instead_of_dropping_it`.
+- Attachment bytes were never deleted, even after every revision using
+  them was replaced or pruned. New `POST /{db}/_compact` (202) deletes
+  bytes no stored revision refers to, and their md5 index entries.
+  Writes that store or check attachment bytes hold a per-database gate
+  until their revision is committed; compaction takes it exclusively, so
+  it can't collect bytes a write has stored but not yet referenced.
+  Tests: unit `compaction_collects_only_unreferenced_attachments`;
+  `test/attachments/run.js` (replaced bytes gone, current and
+  conflict-branch bytes kept).
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a

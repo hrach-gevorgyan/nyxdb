@@ -353,7 +353,45 @@ async function testMissingStub() {
   await req(db, "DELETE", "");
 }
 
+// Replaced attachments used to stay on disk forever. POST /{db}/_compact
+// deletes bytes no revision refers to; current and conflicting-branch
+// attachments must survive it.
+async function testCompactCollectsReplacedAttachments() {
+  const db = "att_gc_" + Date.now();
+  await req(db, "PUT", "");
+  const json = { "Content-Type": "application/json" };
+  const att = (text) => ({ "f.txt": { content_type: "text/plain", data: Buffer.from(text).toString("base64") } });
+  const first = await req(db, "PUT", "/doc", JSON.stringify({ _attachments: att("old bytes") }), json);
+  const edited = await req(db, "PUT", "/doc", JSON.stringify({ _rev: first.body.rev, _attachments: att("new bytes") }), json);
+  const branchRev = "2-" + "b".repeat(32);
+  await req(
+    db,
+    "PUT",
+    "/doc?new_edits=false",
+    JSON.stringify({ _id: "doc", _rev: branchRev, _revisions: { start: 2, ids: ["b".repeat(32), first.body.rev.split("-")[1]] }, _attachments: att("branch bytes") }),
+    json
+  );
+
+  const compacted = await req(db, "POST", "/_compact", JSON.stringify({}), json);
+  const current = await req(db, "GET", `/doc/f.txt?rev=${edited.body.rev}`);
+  const branch = await req(db, "GET", `/doc/f.txt?rev=${branchRev}`);
+  const stale = await req(
+    db,
+    "PUT",
+    "/other",
+    JSON.stringify({ _attachments: { "f.txt": { stub: true, content_type: "text/plain", digest: md5Digest("old bytes"), length: 9 } } }),
+    json
+  );
+  check(
+    "_compact deletes replaced attachment bytes and keeps current and conflict-branch ones",
+    compacted.status === 202 && current.body === "new bytes" && branch.body === "branch bytes" && stale.status === 412,
+    `compact ${compacted.status}; current ${JSON.stringify(current.body)}; branch ${JSON.stringify(branch.body)}; old-digest stub ${stale.status}`
+  );
+  await req(db, "DELETE", "");
+}
+
 async function main() {
+  await testCompactCollectsReplacedAttachments();
   await testMd5Digests();
   await testPullSkipsUnchangedAttachment();
   await testMissingStub();

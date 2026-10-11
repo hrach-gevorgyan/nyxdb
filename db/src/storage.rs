@@ -10,7 +10,8 @@ use sled::Transactional;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
 /// Reads can fail two genuinely different ways: sled itself erroring
 /// (disk I/O, etc. — already a `Result` from sled), or the bytes we get
@@ -117,10 +118,20 @@ impl TryFrom<StoredTree> for RevTree {
 /// fresh per request, so the lock has to live somewhere longer-lived —
 /// `AppState`). See `Db::update_tree` for why it exists.
 #[derive(Clone, Default)]
-pub struct WriteLocks(Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>);
+pub struct WriteLocks(Arc<Mutex<HashMap<String, DbLocks>>>);
+
+#[derive(Clone, Default)]
+struct DbLocks {
+    write: Arc<Mutex<()>>,
+    /// Shared by every write that stores or checks attachment bytes, from
+    /// the blob store until its tree is committed; exclusive for
+    /// `Db::compact_attachments`, so a blob a write has stored but not yet
+    /// referenced can't be collected under it.
+    attachments: Arc<RwLock<()>>,
+}
 
 impl WriteLocks {
-    fn for_db(&self, name: &str) -> Arc<Mutex<()>> {
+    fn for_db(&self, name: &str) -> DbLocks {
         let mut locks = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         locks.entry(name.to_string()).or_default().clone()
     }
@@ -129,6 +140,7 @@ impl WriteLocks {
 #[derive(Clone)]
 pub struct Db {
     write_lock: Arc<Mutex<()>>,
+    attachment_gate: Arc<RwLock<()>>,
     /// The shared root, kept around for `generate_id()` — a lock-free,
     /// mostly-in-memory monotonic counter (batches of ids are persisted
     /// together, not one disk write per id) that replaced a hand-rolled
@@ -158,8 +170,10 @@ pub struct Db {
 
 impl Db {
     pub fn open(base: &sled::Db, name: &str, locks: &WriteLocks) -> StorageResult<Self> {
+        let locks = locks.for_db(name);
         let db = Self {
-            write_lock: locks.for_db(name),
+            write_lock: locks.write,
+            attachment_gate: locks.attachments,
             base: base.clone(),
             docs: base.open_tree(format!("{name}::docs"))?,
             local: base.open_tree(format!("{name}::local"))?,
@@ -233,6 +247,48 @@ impl Db {
         }
         let _ = self.attachment_index.compare_and_swap(md5, None as Option<&[u8]>, Some(key.as_bytes()))?;
         Ok(())
+    }
+
+    /// Held by a write from storing (or checking) attachment bytes until
+    /// its tree is committed. See `DbLocks::attachments`.
+    pub fn attachment_writer(&self) -> RwLockReadGuard<'_, ()> {
+        self.attachment_gate.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Deletes attachment bytes no stored revision refers to any more, and
+    /// their md5 index entries. Only leaves keep bodies (`RevTree::prune`),
+    /// so bytes only an old revision used are collected too. Returns how
+    /// many blobs were deleted.
+    pub fn compact_attachments(&self) -> StorageResult<usize> {
+        let _gate = self.attachment_gate.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut referenced: HashSet<sled::IVec> = HashSet::new();
+        for id in self.doc_ids()? {
+            let Some(tree) = self.get_tree(&id)? else { continue };
+            for node in tree.nodes.values() {
+                let Some(attachments) = node.body.get("_attachments").and_then(|a| a.as_object()) else { continue };
+                for digest in attachments.values().filter_map(|a| a.get("digest")?.as_str()) {
+                    if let Some(key) = self.attachment_key(digest)? {
+                        referenced.insert(key);
+                    }
+                }
+            }
+        }
+        let mut removed = 0;
+        for key in self.attachments.iter().keys() {
+            let key = key?;
+            if !referenced.contains(&key) {
+                self.attachments.remove(&key)?;
+                removed += 1;
+            }
+        }
+        for entry in self.attachment_index.iter() {
+            let (md5, key) = entry?;
+            if !referenced.contains(&key) {
+                self.attachment_index.remove(md5)?;
+            }
+        }
+        self.base.flush()?;
+        Ok(removed)
     }
 
     /// Every stored doc id (tombstones included), in byte order.

@@ -145,6 +145,17 @@ curl -u user:pass "http://127.0.0.1:5984/mydb/_all_docs?include_docs=true&limit=
 GET/PUT/DELETE design docs (id `_design/{name}`). They are stored and
 replicated like any doc; NyxDB doesn't run views.
 
+### `POST /{db}/_compact`
+Deletes attachment bytes that no stored revision refers to any more
+(replaced attachments, and ones only an old, pruned revision had).
+Returns `202 {"ok":true}` once done — unlike CouchDB, it runs before
+answering. Attachment writes to that database wait while it runs. Run it
+occasionally on databases whose attachments change.
+
+```bash
+curl -u user:pass -X POST -H "Content-Type: application/json" http://127.0.0.1:5984/mydb/_compact
+```
+
 ### `GET /{db}/{id}`
 Fetch a document. Add `?conflicts=true` to include a `_conflicts` array
 when conflicts exist.

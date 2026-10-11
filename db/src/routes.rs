@@ -86,6 +86,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/:db/:id/:attname", get(get_attachment).put(put_attachment).delete(delete_attachment))
         .route("/:db/_design/:name", get(get_design).put(put_design).delete(delete_design))
         .route("/:db/_all_docs", get(all_docs).post(all_docs_keys))
+        .route("/:db/_compact", post(compact))
         .route("/:db/_bulk_docs", post(bulk_docs))
         .route("/:db/_revs_diff", post(revs_diff))
         .route("/:db/_bulk_get", post(bulk_get))
@@ -310,6 +311,18 @@ async fn all_docs_keys(
         }
         let total_rows = db.doc_ids().map_err(|_| internal_error())?.len();
         Ok(Json(json!({"total_rows": total_rows, "offset": 0, "rows": rows})))
+    })
+}
+
+/// `POST /{db}/_compact` — deletes attachment bytes no stored revision
+/// refers to any more (see `Db::compact_attachments`). CouchDB answers
+/// 202 and compacts in the background; this runs to completion first.
+async fn compact(State(state): State<AppState>, Path(db_name): Path<String>) -> Result<Response, ApiError> {
+    blocking(|| {
+        let db = state.db(&db_name)?;
+        let removed = db.compact_attachments().map_err(|_| internal_error())?;
+        tracing::info!("compacted {db_name}: {removed} unreferenced attachment(s) deleted");
+        Ok((StatusCode::ACCEPTED, Json(json!({"ok": true}))).into_response())
     })
 }
 
@@ -571,7 +584,11 @@ async fn put_doc(
         if let Some(obj) = body.as_object_mut() {
             obj.insert("_id".to_string(), json!(id));
         }
-        let rev = blocking(|| write_doc_new_edits_false(&db, &feed, &id, &body)).map_err(|reason| match reason {
+        let rev = blocking(|| {
+            let _gate = db.attachment_writer();
+            write_doc_new_edits_false(&db, &feed, &id, &body)
+        })
+        .map_err(|reason| match reason {
             "missing _rev" => ApiError(StatusCode::BAD_REQUEST, "bad_request", "missing _rev"),
             "invalid attachment data" => ApiError(StatusCode::BAD_REQUEST, "bad_request", "invalid attachment data"),
             "missing_stub" => attachment_error(crate::attachments::AttachmentError::MissingStub(String::new())),
@@ -582,6 +599,7 @@ async fn put_doc(
     }
 
     let rev = blocking(|| {
+        let _gate = db.attachment_writer();
         let previous = current_body(&db, &id);
         crate::attachments::extract_inline_attachments(&db, &mut body, previous.as_ref()).map_err(attachment_error)?;
         write_doc(&db, &feed, &id, body).map_err(|_| internal_error())
@@ -639,6 +657,7 @@ async fn put_attachment(
     let db = state.db(&db_name)?;
     let feed = state.feeds.get_or_create(&db_name);
     let rev = blocking(|| {
+        let _gate = db.attachment_writer();
         let mut doc_body = match db.get_tree(&id).map_err(|_| internal_error())? {
             Some(tree) => match tree.winner() {
                 Some(winner) if !tree.nodes[winner].deleted => tree.nodes[winner].body.clone(),
@@ -777,6 +796,7 @@ async fn bulk_docs(
     let new_edits = payload.get("new_edits").and_then(Value::as_bool).unwrap_or(true);
 
     let response = blocking(|| {
+        let _gate = db.attachment_writer();
         if new_edits {
             bulk_docs_new_edits_true(&db, &feed, docs)
         } else {
@@ -1188,9 +1208,17 @@ fn dedupe_latest(entries: Vec<(u64, String)>) -> Vec<(u64, String)> {
     result
 }
 
-fn build_change_row(db: &Db, seq: u64, doc_id: &str, style_all_docs: bool) -> Option<Value> {
-    let tree = db.get_tree(doc_id).ok().flatten()?;
-    let winner = tree.winner()?;
+/// One `_changes` row for `doc_id`, or `None` if the doc is gone (its
+/// database was deleted under the feed). A tree that can't be read is an
+/// error, never a skipped row: skipping let the client's checkpoint pass a
+/// change it never received.
+fn build_change_row(db: &Db, seq: u64, doc_id: &str, style_all_docs: bool) -> Result<Option<Value>, ApiError> {
+    let tree = db.get_tree(doc_id).map_err(|err| {
+        tracing::error!("_changes: cannot read doc {doc_id:?}: {err}");
+        internal_error()
+    })?;
+    let Some(tree) = tree else { return Ok(None) };
+    let Some(winner) = tree.winner() else { return Ok(None) };
     let node = &tree.nodes[winner];
     let changes: Vec<Value> = if style_all_docs {
         tree.leaves().into_iter().map(|rev| json!({"rev": rev})).collect()
@@ -1201,7 +1229,7 @@ fn build_change_row(db: &Db, seq: u64, doc_id: &str, style_all_docs: bool) -> Op
     if node.deleted {
         row["deleted"] = json!(true);
     }
-    Some(row)
+    Ok(Some(row))
 }
 
 fn changes_normal(db: &Db, since: u64, style_all_docs: bool, limit: Option<usize>) -> Result<Response, ApiError> {
@@ -1218,9 +1246,9 @@ fn changes_body(db: &Db, since: u64, style_all_docs: bool, limit: Option<usize>)
     let mut last_seq = entries.iter().map(|(seq, _)| *seq).max().unwrap_or(since);
     let results: Vec<Value> = dedupe_latest(entries)
         .iter()
-        .filter_map(|(seq, id)| build_change_row(db, *seq, id, style_all_docs))
+        .filter_map(|(seq, id)| build_change_row(db, *seq, id, style_all_docs).transpose())
         .take(limit.unwrap_or(usize::MAX))
-        .collect();
+        .collect::<Result<_, _>>()?;
     // With a `limit` that cut the feed short, the checkpoint must stop at
     // the last row actually returned so the next page resumes from there.
     if let Some(last) = results.last().filter(|_| limit.is_some_and(|n| n <= results.len())) {
@@ -1326,11 +1354,16 @@ fn changes_continuous(
     let stream = futures::stream::unfold(initial, |mut st| async move {
         loop {
             if let Some((seq, id)) = st.queue.pop_front() {
-                if let Some(row) = blocking(|| build_change_row(&st.db, seq, &id, st.style_all_docs)) {
-                    st.last_seq = st.last_seq.max(seq);
-                    return Some((Ok::<_, std::io::Error>(Bytes::from(format!("{row}\n"))), st));
+                match blocking(|| build_change_row(&st.db, seq, &id, st.style_all_docs)) {
+                    Ok(Some(row)) => {
+                        st.last_seq = st.last_seq.max(seq);
+                        return Some((Ok::<_, std::io::Error>(Bytes::from(format!("{row}\n"))), st));
+                    }
+                    Ok(None) => continue,
+                    // End the feed before the unreadable row: the client
+                    // reconnects from the last seq it actually got.
+                    Err(_) => return None,
                 }
-                continue;
             }
 
             let received = match st.heartbeat {
@@ -1345,11 +1378,14 @@ fn changes_continuous(
                     if event.seq <= st.last_seq {
                         continue;
                     }
-                    if let Some(row) = blocking(|| build_change_row(&st.db, event.seq, &event.doc_id, st.style_all_docs)) {
-                        st.last_seq = event.seq;
-                        return Some((Ok(Bytes::from(format!("{row}\n"))), st));
+                    match blocking(|| build_change_row(&st.db, event.seq, &event.doc_id, st.style_all_docs)) {
+                        Ok(Some(row)) => {
+                            st.last_seq = event.seq;
+                            return Some((Ok(Bytes::from(format!("{row}\n"))), st));
+                        }
+                        Ok(None) => continue,
+                        Err(_) => return None,
                     }
-                    continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => match blocking(|| st.db.changes_since(st.last_seq)) {
                     Ok(missed) => {
@@ -1384,6 +1420,53 @@ mod tests {
         assert_eq!(rev.as_deref(), Some("1-old"));
         assert!(deleted);
         assert_eq!(body, json!({"keep": 1}));
+    }
+
+    /// Compaction deletes the bytes of attachments no revision uses any
+    /// more — replaced ones, and ones only a pruned (non-leaf) revision had
+    /// — and keeps every leaf's, conflict branches included.
+    #[test]
+    fn compaction_collects_only_unreferenced_attachments() {
+        let base = sled::Config::new().temporary(true).open().unwrap();
+        let db = Db::open(&base, "gc", &WriteLocks::default()).unwrap();
+        let feed = ChangeFeed::default();
+        let stub = |data: &[u8]| {
+            let digest = crate::attachments::store_raw_attachment(&db, data).unwrap();
+            json!({"_attachments": {"f": {"stub": true, "digest": digest, "length": data.len()}}})
+        };
+        let write = |revs: &[&str], body: Value| {
+            let revs: Vec<String> = revs.iter().map(|r| r.to_string()).collect();
+            db.update_tree("doc", &feed, |tree| tree.insert_revision_chain(&revs, false, body)).unwrap();
+        };
+        let (old, kept, branch) = (stub(b"old"), stub(b"kept"), stub(b"branch"));
+        write(&["1-a"], old.clone());
+        write(&["2-b", "1-a"], kept.clone());
+        write(&["2-c", "1-a"], branch.clone());
+        stub(b"never referenced");
+
+        assert_eq!(db.compact_attachments().unwrap(), 2);
+        let digest = |body: &Value| body["_attachments"]["f"]["digest"].as_str().unwrap().to_string();
+        assert!(db.get_attachment(&digest(&kept)).unwrap().is_some());
+        assert!(db.get_attachment(&digest(&branch)).unwrap().is_some());
+        assert!(db.get_attachment(&digest(&old)).unwrap().is_none());
+        assert_eq!(db.attachments.len(), 2);
+        assert_eq!(db.compact_attachments().unwrap(), 0);
+    }
+
+    /// A doc whose stored tree can't be read must fail `_changes`, not
+    /// vanish from it: a silently dropped row lets the client's checkpoint
+    /// move past a change it never got.
+    #[test]
+    fn changes_reports_an_unreadable_doc_instead_of_dropping_it() {
+        let base = sled::Config::new().temporary(true).open().unwrap();
+        let db = Db::open(&base, "bad", &WriteLocks::default()).unwrap();
+        let feed = ChangeFeed::default();
+        for id in ["a", "b"] {
+            db.update_tree(id, &feed, |tree| tree.insert_revision_chain(&["1-a".to_string()], false, json!({})))
+                .unwrap();
+        }
+        db.docs.insert("a", &b"\xff\xff not a tree"[..]).unwrap();
+        assert!(changes_body(&db, 0, false, None).is_err());
     }
 
     /// A write that lands after longpoll has checked storage (found
