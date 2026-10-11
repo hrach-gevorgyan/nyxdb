@@ -13,7 +13,7 @@
 // server's default limit), and spawns its own small-limit server
 // (NYXDB_BIN, port LARGE_PORT) to check behaviour at the limit cheaply.
 
-const PouchDB = require("pouchdb");
+const PouchDB = require("./pouchdb");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");

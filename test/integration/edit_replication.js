@@ -12,7 +12,7 @@
 // Expects the server running at SERVER_URL (default http://127.0.0.1:8085)
 // with NYXDB_USER/NYXDB_PASSWORD matching TEST_USER/TEST_PASSWORD.
 
-const PouchDB = require("pouchdb");
+const PouchDB = require("./pouchdb");
 
 const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
 const TEST_USER = process.env.TEST_USER || "testuser";

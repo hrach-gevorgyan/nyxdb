@@ -13,7 +13,7 @@
 //
 // Requires a built binary: NYXDB_BIN (default target/release/nyxdb[.exe]).
 
-const PouchDB = require("pouchdb");
+const PouchDB = require("./pouchdb");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");

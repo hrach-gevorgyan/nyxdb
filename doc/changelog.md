@@ -11,6 +11,11 @@ Fixes from a read-only review of v0.1.6, in its priority order. Each
 fix was written test-first: the new test failed before the fix and
 failed again with the fix deliberately broken.
 
+The PouchDB integration suite (and `test/write_semantics`) now also runs
+on PouchDB 9.x, what Offlog ships, as well as 8.0.1: `POUCHDB=9`, a
+second CI step. All of it passes on 9.0.0, and it catches the v0.1.6
+`_revisions` bug there too when that is reintroduced.
+
 **1. Concurrent writes to the same doc lost a branch (critical).**
 Every write did read tree → modify → write tree with no lock, on a
 multi-threaded runtime. Two simultaneous writes to one doc both read

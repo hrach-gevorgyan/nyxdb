@@ -1,10 +1,14 @@
 # Tests
 
 - `integration/` — drives a real PouchDB client against a running
-  server instance: one-shot replication, `live:true` two-device sync, and
+  server instance: one-shot replication, `live:true` two-device sync,
   editing an already-replicated doc without creating phantom conflicts,
-  and (`checkpoint_resume.js`, spawns its own server on port 8298)
-  resuming from the replication checkpoint across a server restart.
+  deletions reaching replicas that already have the doc, batches over 100
+  docs and near the body limit (`large_batches.js`), and
+  (`checkpoint_resume.js`, spawns its own server on port 8298) resuming
+  from the replication checkpoint across a server restart. Runs on
+  PouchDB 8.0.1 by default; `POUCHDB=9` runs it on 9.x (what Offlog
+  ships). Both are installed by `npm install --prefix test/integration`.
 - `startup/` — startup failures exit with a clear message and code 2/3/4,
   never a panic. Spawns its own server.
 - `memory/` — memory stays bounded while ~100 MB of small docs are
@@ -58,6 +62,7 @@ node test/integration/edit_replication.js
 node test/integration/delete_replication.js
 node test/integration/checkpoint_resume.js   # spawns its own server
 node test/integration/large_batches.js       # also spawns a small-limit server
+# ...and the same again on PouchDB 9.x: set POUCHDB=9 (also for write_semantics)
 
 # Startup failures, memory bound (both spawn their own server), stalls
 node test/startup/run.js

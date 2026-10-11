@@ -12,7 +12,7 @@
 // case; everything else is plain fetch.
 // Requires: SERVER_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
 
-const PouchDB = require("../integration/node_modules/pouchdb");
+const PouchDB = require("../integration/pouchdb");
 
 const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
 const OUR_USER = process.env.OUR_USER || "testuser";

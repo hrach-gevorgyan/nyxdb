@@ -67,6 +67,18 @@ jobs:
           node test/integration/checkpoint_resume.js
           node test/integration/large_batches.js
 
+      - name: Integration tests on PouchDB 9.x (what Offlog ships)
+        env:
+          POUCHDB: "9"
+        run: |
+          node test/integration/run.js
+          node test/integration/live_sync.js
+          node test/integration/edit_replication.js
+          node test/integration/delete_replication.js
+          node test/integration/checkpoint_resume.js
+          node test/integration/large_batches.js
+          node test/write_semantics/run.js
+
       - name: Startup failures exit cleanly
         run: node test/startup/run.js
 
