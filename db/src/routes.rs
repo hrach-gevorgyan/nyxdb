@@ -126,6 +126,8 @@ async fn normalize_error_body(request: Request, next: Next) -> Response {
     let error = match parts.status {
         StatusCode::NOT_FOUND => "not_found",
         StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
+        // CouchDB's name for an over-limit body (NYXDB_MAX_BODY_BYTES).
+        StatusCode::PAYLOAD_TOO_LARGE => "too_large",
         s if s.is_server_error() => "internal_error",
         _ => "bad_request",
     };

@@ -48,6 +48,7 @@ node test/integration/run.js
 node test/integration/live_sync.js
 node test/integration/edit_replication.js
 node test/integration/checkpoint_resume.js   # spawns its own server
+node test/integration/large_batches.js       # also spawns a small-limit server
 
 # Startup failures, memory bound (both spawn their own server), stalls
 node test/startup/run.js

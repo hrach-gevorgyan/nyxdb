@@ -190,6 +190,20 @@ prompt wake-up on a write).
   tasks to another thread. Test: `test/blocking/run.js` (80 scans of a
   20k-doc db while timing `GET /`; 1,025 ms with the fix removed).
 
+**11. The 50 MB body limit could stall sync (medium).** PouchDB pushes
+100 docs per `_bulk_docs` request with attachments inline as base64.
+Reproduced: a real PouchDB push of 120 docs with 600 KB attachments
+(~80 MB per batch) got `413` and failed. The default limit is now
+256 MB — one maximal Offlog doc (ten 10 MB attachments, ≈133 MB as
+base64) fits — and an over-limit body gets CouchDB's
+`413 {"error":"too_large"}` instead of a generic `bad_request`. Not
+streamed: a request is still held in memory while processed, so the
+limit is also the memory guard. `doc/USAGE.md` spells out the
+`batch_size` rule for clients (Offlog needs `batch_size: 1` for
+attachment-heavy replication, or a higher server limit). Test:
+`test/integration/large_batches.js` (250-doc batch, the PouchDB push,
+just-under and just-over a small limit on a self-spawned server).
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a

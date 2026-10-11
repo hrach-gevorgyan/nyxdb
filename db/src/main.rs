@@ -109,12 +109,17 @@ async fn main() {
 
     // Unbounded request bodies are a real memory-exhaustion vector (see
     // doc/AUDIT.md) — axum buffers the whole body before a Json
-    // extractor ever runs. Default is generous enough for a large
-    // _bulk_docs sync batch without being effectively unlimited;
-    // override via NYXDB_MAX_BODY_BYTES if a deployment needs
-    // something different.
+    // extractor ever runs. But PouchDB pushes 100 docs per _bulk_docs
+    // request with attachments inline as base64, and the old 50 MB cap
+    // turned an attachment-carrying batch into a 413 that replication
+    // retried forever. 256 MB fits one maximal Offlog doc (ten 10 MB
+    // attachments ≈ 133 MB as base64) with room to spare; clients sending
+    // many attachment-heavy docs per batch should lower PouchDB's
+    // `batch_size` to stay under it (doc/USAGE.md). Peak memory for a
+    // request is a small multiple of its size. NYXDB_MAX_BODY_BYTES to
+    // change it.
     let max_body_bytes: usize = match std::env::var("NYXDB_MAX_BODY_BYTES") {
-        Err(_) => 50 * 1024 * 1024,
+        Err(_) => 256 * 1024 * 1024,
         Ok(v) => v
             .parse()
             .unwrap_or_else(|_| fail(EXIT_CONFIG, &format!("NYXDB_MAX_BODY_BYTES must be a number of bytes, got {v:?}"))),

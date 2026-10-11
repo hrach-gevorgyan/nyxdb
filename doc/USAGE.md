@@ -50,7 +50,7 @@ curl -u admin:<password> -X PUT http://127.0.0.1:5984/mydb     # needs auth
 | `NYXDB_CORS_ORIGINS` | unset (CORS off) | comma-separated allowed origins, no wildcard |
 | `NYXDB_CACHE_MB` | `32` | sled page-cache size; real memory is roughly 25 MB + 2× this (see below) |
 | `NYXDB_COMPRESSION_LEVEL` | sled's default (5) | zstd level, 1–22 |
-| `NYXDB_MAX_BODY_BYTES` | `52428800` (50 MB) | largest accepted request body |
+| `NYXDB_MAX_BODY_BYTES` | `268435456` (256 MB) | largest accepted request body; larger gets `413 {"error":"too_large"}` |
 
 Source: `db/src/main.rs`, `db/src/auth.rs`.
 
@@ -70,6 +70,19 @@ would remove the limit and is an open option.
 
 Storage work runs on tokio's blocking pool, so slow requests (a full
 `_changes` scan of a large db) don't stall unrelated ones.
+
+**Request size and attachments.** PouchDB pushes 100 docs per
+`_bulk_docs` request by default, with attachments inline as base64
+(~1.33× their size). One request must fit under `NYXDB_MAX_BODY_BYTES`
+(256 MB by default), or it gets `413 too_large` — and a replicator that
+keeps retrying the same batch never gets past it. Rule of thumb for a
+client: `batch_size × (largest doc's attachments × 1.33)` must stay
+under the limit. For Offlog (up to ten 10 MB attachments per task,
+≈133 MB base64 per doc at worst), one maximal doc fits; replicating
+attachment-heavy tasks needs PouchDB's `batch_size` at 1 (or the
+server's limit raised). The server holds a request in memory while
+processing it, so peak memory per request is a small multiple of its
+size.
 
 ## 4. Endpoints
 

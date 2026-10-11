@@ -9,6 +9,7 @@ inttest_*/
 livetest_*/
 edittest_*/
 ckpt_local_*/
+largebatch_*/
 att_conflict_local_*/
 att_redownload_local_*/
 data-*/
