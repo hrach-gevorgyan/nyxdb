@@ -784,11 +784,16 @@ fn build_change_row(db: &Db, seq: u64, doc_id: &str, style_all_docs: bool) -> Op
 
 fn changes_normal(db: &Db, since: u64, style_all_docs: bool) -> Result<Response, ApiError> {
     let entries = db.changes_since(since).map_err(|_| internal_error())?;
+    // `last_seq` is the highest seq this scan actually covered (or
+    // `since` if it found nothing) — never the db's current seq read
+    // afterwards. A write landing between the scan and that read would
+    // otherwise sit below the client's new checkpoint without ever having
+    // been returned, and be skipped forever (see doc/changelog.md, v0.1.7).
+    let last_seq = entries.iter().map(|(seq, _)| *seq).max().unwrap_or(since);
     let results: Vec<Value> = dedupe_latest(entries)
         .iter()
         .filter_map(|(seq, id)| build_change_row(db, *seq, id, style_all_docs))
         .collect();
-    let last_seq = db.current_seq().map_err(|_| internal_error())?;
     Ok(Json(json!({"results": results, "last_seq": last_seq})).into_response())
 }
 

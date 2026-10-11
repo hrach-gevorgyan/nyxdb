@@ -23,6 +23,20 @@ new_edits:false`, plain `PUT`). Fixed with a per-database write lock:
 holds the lock across read → modify → write → seq assignment →
 publish. Test: `test/concurrency/run.js`.
 
+**2. `_changes` could skip changes forever (high).** (a) The normal
+feed collected its results, then read the db's current seq as
+`last_seq`; a write landing in between sat below the client's new
+checkpoint without ever being returned. Reproduced: a follower polling
+by `last_seq` during 16 parallel writers permanently missed ~50 of 960
+docs. `last_seq` is now the highest seq the scan actually covered (or
+`since`). (b) Seqs were assigned and published outside any lock, so
+they could become visible and be broadcast out of order, and the
+continuous feed drops `seq <= last_seq` — fixed by the #1 lock, which
+now covers seq assignment and publishing. Test:
+`test/changes_follow/run.js` (polling + continuous followers); breaking
+(a) makes the poller miss docs, breaking (b) makes the continuous
+follower miss docs.
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a
