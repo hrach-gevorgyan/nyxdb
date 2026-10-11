@@ -64,34 +64,27 @@ under the rug.
 
 ## Benchmarks
 
-One machine, one run each, release build vs. a real local CouchDB
+One machine, median of 3 runs, release build vs. a real local CouchDB
 3.5.2 — order-of-magnitude numbers, not a lab-grade benchmark. Full
 methodology, historical progression, and honest caveats in
 **[doc/BENCHMARKS.md](doc/BENCHMARKS.md)**, re-run and updated after
 every release.
 
-**Last tested: v0.1.5, 2026-07-27 17:56 UTC.**
-
-*These CouchDB numbers are from v0.1.5. v0.1.7 against v0.1.6 (median of 3, see [BENCHMARKS.md](doc/BENCHMARKS.md)): reads, `_changes`, bulk writes and memory about the same; single-doc writes ~1.2 ms instead of ~0.2 ms, because every write is now on disk before it is acknowledged.*
+**Last tested: v0.1.7 vs CouchDB 3.5.2, 2026-10-11, median of 3 runs.**
 
 | | NyxDB | Real CouchDB | Ratio |
 |---|---|---|---|
-| Install size | 4.39 MB | 229 MB | **~52x smaller** |
-| Write throughput (5,000 docs, one `_bulk_docs`) | ~16,340 docs/sec | ~3,870 docs/sec | **~4.2x faster** |
-| Read throughput (200 sequential `GET`) | 10.66ms/req | 10.79ms/req | ~1.01x faster |
-| Idle memory | 27.8 MB | ~93.5 MB | **~3.4x lighter** |
-| Memory after a 5,000-doc write | 35.4 MB | ~116 MB | **~3.3x lighter** |
-| Disk size (same 5,000-doc dataset) | 1.84 MB | 1.74 MB | ~1.06x more |
-| Startup time | <20ms | seconds (Erlang/OTP boot) | — |
-| `_changes` in-process notification latency | ~0.14ms | not measured | — |
+| Install size | 5.98 MB | ~229 MB | **~38x smaller** |
+| Bulk write (5,000 docs, one `_bulk_docs`) | ~22,500 docs/sec | ~3,500 docs/sec | **~6.4x faster** |
+| Single-doc write (on disk before the reply) | 1.38 ms | 7.91 ms | **~5.7x faster** |
+| Single-doc read | 0.19 ms | 3.14 ms | **~17x faster** |
+| PouchDB pull of 5,700 docs | 0.62 s | 2.61 s | **~4.2x faster** |
+| Idle memory | 28 MB | 144 MB | **~5x lighter** |
 
-Write throughput varies noticeably run to run on a shared dev machine
-(this round: 4.2x; earlier releases measured 4.75x and 6.5x at
-different points in the same long session) — see
-[doc/BENCHMARKS.md](doc/BENCHMARKS.md) for the honest caveat. Disk
-size is the one metric that doesn't outright win, and it's close —
-see that file for what the gap actually costs at real-world scale
-(it's small).
+Same machine for both, median of 3 runs; run-to-run spread is about
+±20%. Disk after the same workload is also smaller (3 MB vs 13 MB before
+CouchDB compacts). Details, and v0.1.6 for comparison, in
+[doc/BENCHMARKS.md](doc/BENCHMARKS.md).
 
 ## Compatibility
 

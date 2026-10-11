@@ -1,31 +1,41 @@
 # Benchmarks
 
-## v0.1.7 vs v0.1.6 (2026-10-11)
+## v0.1.7 vs v0.1.6 vs CouchDB 3.5.2 (2026-10-11)
 
-Same machine (i7-13650HX, Windows 11, NVMe), release builds, 5,000
-task-like docs, **median of 3 runs**, each run on a fresh server and
-data dir. Reproduce with `test/benchmark/compare.js`:
+Same machine (i7-13650HX, Windows 11, NVMe), release builds, CouchDB
+3.5.2 as installed (Windows service, default config), 5,000 task-like
+docs, **median of 3 runs**, each NyxDB run on a fresh server and data
+dir, each CouchDB run on a fresh database. Reproduce with
+`test/benchmark/compare.js`:
 
 ```bash
-BENCH_NYXDB="v0.1.7=target/release/nyxdb.exe,v0.1.6=path/to/v0.1.6/nyxdb.exe" node test/benchmark/compare.js
+BENCH_NYXDB="v0.1.7=target/release/nyxdb.exe,v0.1.6=path/to/v0.1.6/nyxdb.exe" COUCH_USER=admin COUCH_PASSWORD=secret node test/benchmark/compare.js
 ```
 
-| | v0.1.7 | v0.1.6 | |
-|---|---|---|---|
-| Bulk write, one `_bulk_docs` (docs/s) | 24,767 | 32,090 | 0.8× |
-| Single-doc `PUT`, sequential (ms/write) | 1.19 | 0.18 | 6.6× slower |
-| Concurrent `PUT`, 8 clients (writes/s) | 1,127 | 15,789 | 14× slower |
-| Single-doc `GET`, sequential (ms/read) | 0.15 | 0.13 | same |
-| Full `_changes`, 5,700 docs (ms) | 29.4 | 27.5 | same |
-| `_bulk_get` of 1,000 docs (ms) | 12.1 | 12.7 | same |
-| PouchDB pull of the whole db (s) | 0.50 | 0.37 | 1.4× slower |
-| Attachment upload, 20 × 512 KB (MB/s) | 117 | 193 | 0.6× |
-| Idle memory (MB) | 28.1 | 27.8 | same |
-| Memory after the workload (MB) | 56.2 | 52.2 | same |
-| Writing 100 MB in PouchDB-sized batches of 100: peak memory (MB) | 88 | 170 | half |
-| Disk after the workload (MB) | 3.00 | 2.91 | same |
-| Startup to first response (ms) | 67 | 68 | same |
-| Binary size (MB) | 5.98 | 4.44 | |
+| | v0.1.7 | v0.1.6 | CouchDB | v0.1.7 vs CouchDB |
+|---|---|---|---|---|
+| Bulk write, one `_bulk_docs` (docs/s) | 22,511 | 29,595 | 3,498 | 6.4× faster |
+| Single-doc `PUT`, sequential (ms/write) | 1.38 | 0.25 | 7.91 | 5.7× faster |
+| Concurrent `PUT`, 8 clients (writes/s) | 1,182 | 10,148 | 535 | 2.2× faster |
+| Single-doc `GET`, sequential (ms/read) | 0.19 | 0.15 | 3.14 | 17× faster |
+| Full `_changes`, 5,700 docs (ms) | 33.5 | 32.0 | 961 | 29× faster |
+| `_bulk_get` of 1,000 docs (ms) | 15.8 | 15.8 | 161 | 10× faster |
+| PouchDB pull of the whole db (s) | 0.62 | 0.41 | 2.61 | 4.2× faster |
+| Attachment upload, 20 × 512 KB (MB/s) | 77.8 | 110 | 16.0 | 4.9× faster |
+| Idle memory (MB) | 28.2 | 27.7 | 144 | 5.1× lighter |
+| Memory after the workload (MB) | 57.3 | 51.9 | 150 | 2.6× lighter |
+| Disk after the workload (MB) | 3.00 | 2.90 | 13.0* | 4.3× smaller |
+| Startup to first response (ms) | 81 | 63 | — (service) | |
+| Install size (MB) | 5.98 | 4.44 | ~229 | ~38× smaller |
+
+\* CouchDB's `sizes.file` before compaction; it shrinks after
+`_compact`. NyxDB's figure is its whole data directory.
+
+Run-to-run spread on this laptop is roughly ±20%; treat ratios under
+~1.5× as "about the same". CouchDB was measured as a running service
+(memory = its Erlang VM processes), NyxDB as a process started per run.
+Writing 100 MB in PouchDB-sized batches of 100 peaks at 88 MB for
+v0.1.7 and 170 MB for v0.1.6 (separate run).
 
 **What it means.**
 
@@ -75,7 +85,7 @@ run. Per-release testing policy: benchmarks are re-run and this file
 updated after every version bump, not left stale from an earlier
 release — see `doc/changelog.md` for what changed in each version.
 
-*The CouchDB comparison below is from v0.1.5. For v0.1.7 against v0.1.6 on the same machine, see the first section.*
+*The detailed comparison below is from v0.1.5 and uses Node's fetch (see the measurement note above). The first section is current.*
 
 ---
 
