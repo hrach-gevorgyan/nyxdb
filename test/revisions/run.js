@@ -18,22 +18,6 @@
 //
 // Requires: SERVER_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
 
-const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
-const OUR_USER = process.env.OUR_USER || "testuser";
-const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
-const AUTH = "Basic " + Buffer.from(`${OUR_USER}:${OUR_PASSWORD}`).toString("base64");
-
-let failures = 0;
-
-function check(name, condition, detail) {
-  if (condition) {
-    console.log(`PASS: ${name}`);
-  } else {
-    console.error(`FAIL: ${name}${detail ? " — " + detail : ""}`);
-    failures++;
-  }
-}
-
 async function req(dbName, method, path, body) {
   const resp = await fetch(`${SERVER_URL}/${dbName}${path}`, {
     method,
@@ -52,6 +36,7 @@ async function req(dbName, method, path, body) {
 
 // Key-order-insensitive: JSON object key order isn't part of the API.
 const same = (a, b) => require("node:util").isDeepStrictEqual(a, b);
+const { SERVER_URL, OUR_USER, OUR_PASSWORD, AUTH, check, finish } = require("../lib/harness.js");
 const revsOf = (docs) => docs.map((d) => d.ok?._rev).sort();
 const findOk = (docs, rev) => docs.find((d) => d.ok?._rev === rev)?.ok;
 
@@ -249,11 +234,7 @@ async function main() {
     await req(db, "DELETE", "");
   }
 
-  if (failures > 0) {
-    console.error(`\n${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log("\nAll revision-history read-path tests pass");
+  finish("All revision-history read-path tests pass");
 }
 
 main().catch((err) => {

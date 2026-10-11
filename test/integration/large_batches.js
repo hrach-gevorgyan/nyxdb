@@ -14,29 +14,11 @@
 // (NYXDB_BIN, port LARGE_PORT) to check behaviour at the limit cheaply.
 
 const PouchDB = require("./pouchdb");
-const { spawn } = require("node:child_process");
 const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
+const { SERVER_URL, TEST_USER, TEST_PASSWORD, AUTH, BIN, check, finish, spawnServer } = require("../lib/harness.js");
 
-const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
-const TEST_USER = process.env.TEST_USER || "testuser";
-const TEST_PASSWORD = process.env.TEST_PASSWORD || "testpass";
-const AUTH = "Basic " + Buffer.from(`${TEST_USER}:${TEST_PASSWORD}`).toString("base64");
-const BIN =
-  process.env.NYXDB_BIN ||
-  path.join(__dirname, "..", "..", "target", "release", process.platform === "win32" ? "nyxdb.exe" : "nyxdb");
 const PORT = Number(process.env.LARGE_PORT || 8294);
 const SMALL_LIMIT = 8 * 1024 * 1024;
-
-let failures = 0;
-function check(name, condition, detail) {
-  if (condition) console.log(`PASS: ${name}`);
-  else {
-    console.error(`FAIL: ${name}${detail ? " — " + detail : ""}`);
-    failures++;
-  }
-}
 
 async function bulk(base, auth, db, docs) {
   const resp = await fetch(`${base}/${db}/_bulk_docs`, {
@@ -88,28 +70,9 @@ async function sharedServerChecks() {
 
 async function limitChecks() {
   if (!fs.existsSync(BIN)) throw new Error(`no server binary at ${BIN} (build it, or set NYXDB_BIN)`);
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "nyxdb-limit-"));
-  const base = `http://127.0.0.1:${PORT}`;
-  const auth = "Basic " + Buffer.from("lim:lim").toString("base64");
-  const child = spawn(BIN, [], {
-    env: {
-      ...process.env,
-      NYXDB_USER: "lim",
-      NYXDB_PASSWORD: "lim",
-      NYXDB_DATA: dataDir,
-      NYXDB_ADDR: `127.0.0.1:${PORT}`,
-      NYXDB_MAX_BODY_BYTES: String(SMALL_LIMIT),
-    },
-    stdio: "ignore",
-  });
-  const exited = new Promise((r) => child.once("exit", r));
+  const server = await spawnServer({ port: PORT, user: "lim", password: "lim", env: { NYXDB_MAX_BODY_BYTES: String(SMALL_LIMIT) } });
+  const { url: base, auth } = server;
   try {
-    for (let i = 0; i < 100; i++) {
-      try {
-        if ((await fetch(`${base}/`)).ok) break;
-      } catch {}
-      await new Promise((r) => setTimeout(r, 50));
-    }
     await fetch(`${base}/lim`, { method: "PUT", headers: { Authorization: auth } });
     const sized = (bytes) => [{ _id: "big", pad: "x".repeat(bytes - 100) }];
     const under = await bulk(base, auth, "lim", sized(SMALL_LIMIT - 64 * 1024));
@@ -121,20 +84,14 @@ async function limitChecks() {
       `${over.status} ${JSON.stringify(over.body)}`
     );
   } finally {
-    child.kill("SIGKILL");
-    await exited;
-    fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await server.stop();
   }
 }
 
 async function main() {
   await sharedServerChecks();
   await limitChecks();
-  if (failures > 0) {
-    console.error(`\n${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log("\nLarge batches go through; over-limit bodies get a clean 413");
+  finish("Large batches go through; over-limit bodies get a clean 413");
 }
 
 main().catch((err) => {

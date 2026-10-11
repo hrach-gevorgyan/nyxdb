@@ -11,23 +11,11 @@
 // Requires: SERVER_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
 
 const os = require("node:os");
+const { SERVER_URL, OUR_USER, OUR_PASSWORD, AUTH, check, finish } = require("../lib/harness.js");
 
-const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
-const OUR_USER = process.env.OUR_USER || "testuser";
-const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
-const AUTH = "Basic " + Buffer.from(`${OUR_USER}:${OUR_PASSWORD}`).toString("base64");
 const DOCS = Number(process.env.BLOCKING_DOCS || 20000);
 const SLOW = Number(process.env.BLOCKING_SLOW || os.cpus().length * 4);
 const LIMIT_MS = Number(process.env.BLOCKING_LIMIT_MS || 500);
-
-let failures = 0;
-function check(name, condition, detail) {
-  if (condition) console.log(`PASS: ${name}`);
-  else {
-    console.error(`FAIL: ${name}${detail ? " — " + detail : ""}`);
-    failures++;
-  }
-}
 
 const req = (db, method, path, body) =>
   fetch(`${SERVER_URL}/${db}${path}`, {
@@ -65,11 +53,7 @@ async function main() {
     await req(db, "DELETE", "");
   }
 
-  if (failures > 0) {
-    console.error(`\n${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log("\nSlow storage work doesn't stall other requests");
+  finish("Slow storage work doesn't stall other requests");
 }
 
 main().catch((err) => {

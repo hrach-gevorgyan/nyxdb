@@ -47,69 +47,39 @@
 - `attachments/` — inline + standalone attachment endpoints, plus a
   real PouchDB client's `putAttachment`/`getAttachment`.
 
-Rust unit tests live in `db/src/*.rs` (`#[cfg(test)]`), not here.
+Rust unit tests live in `db/src/**/*.rs` (`#[cfg(test)]`), not here.
+Shared helpers (config, `check`/`finish`, `spawnServer`) are in
+`lib/harness.js`.
 
 ## Running
 
+Everything, the way CI does it (release build with zero warnings,
+clippy, unit tests, every suite against a scratch server on port 8281,
+then the PouchDB-driven suites again on PouchDB 9.x):
+
 ```bash
-# Unit tests
-cargo test --manifest-path db/Cargo.toml
+npm install --prefix test/integration   # once
+node test/run_all.js                    # exit 0 = all passed
+node test/run_all.js --no-rust feeds    # skip cargo; only suites matching "feeds"
+```
 
-# Integration: real PouchDB client against your server
-node test/integration/run.js
-node test/integration/live_sync.js
-node test/integration/edit_replication.js
-node test/integration/delete_replication.js
-node test/integration/checkpoint_resume.js   # spawns its own server
-node test/integration/large_batches.js       # also spawns a small-limit server
-# ...and the same again on PouchDB 9.x: set POUCHDB=9 (also for write_semantics)
+One suite against a server you started yourself:
 
-# Startup failures, memory bound (both spawn their own server), stalls
-node test/startup/run.js
-node test/memory/run.js
-node test/blocking/run.js
+```bash
+SERVER_URL=http://127.0.0.1:5984 OUR_USER=admin OUR_PASSWORD=secret node test/feeds/run.js
+POUCHDB=9 node test/integration/live_sync.js   # PouchDB-driven suites: pick 8 (default) or 9
+```
 
-# Database creation and naming
-node test/databases/run.js
+`OUR_USER`/`OUR_PASSWORD` and `TEST_USER`/`TEST_PASSWORD` are the same
+setting (either works; default `testuser`/`testpass`).
 
-# Write semantics
-node test/write_semantics/run.js
+Suites that spawn their own server need the release binary (or
+`NYXDB_BIN`) and use these ports: startup 8297, memory 8295, durability
+8299, ops 8292, checkpoint_resume 8298, large_batches 8294.
 
-# Read endpoints
-node test/read_surface/run.js
+Need a real CouchDB (not run by `run_all.js` or CI):
 
-# Hard-kill durability (spawns its own server on port 8299)
-node test/durability/run.js
-
-# Request limits, tracing, CORS max-age (spawns its own server on port 8292)
-node test/ops/run.js
-
-# _changes followers under concurrent writes
-node test/changes_follow/run.js
-
-# longpoll/continuous heartbeat and timeout
-node test/feeds/run.js
-
-# Concurrent writers to one doc
-node test/concurrency/run.js
-
-# Revision history on read paths
-node test/revisions/run.js
-
-# Differential: needs a real CouchDB instance at COUCH_URL
-COUCH_USER=admin COUCH_PASSWORD=yourpass node test/differential/run.js
-
-# Load/soak: run against a --release build for meaningful numbers.
-# Server needs NYXDB_USER/PASSWORD matching TEST_USER/PASSWORD
-# (default: testuser/testpass). Scale with LOAD_BULK_SIZE/LOAD_SUBSCRIBERS.
-node test/load/run.js
-
-# Benchmark vs. real CouchDB
-COUCH_USER=admin COUCH_PASSWORD=yourpass node test/benchmark/vs_couchdb.js
-
-# Ported PouchDB test cases
-node test/ported/pouchdb_tests.js
-
-# Attachments
-node test/attachments/run.js
+```bash
+COUCH_USER=admin COUCH_PASSWORD=secret node test/differential/run.js
+COUCH_USER=admin COUCH_PASSWORD=secret node test/benchmark/vs_couchdb.js
 ```

@@ -7,32 +7,18 @@
 //
 // Requires a built binary: NYXDB_BIN (default target/release/nyxdb[.exe]).
 
-const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
+const { basicAuth, check, finish, sleep, spawnServer } = require("../lib/harness.js");
 
-const BIN =
-  process.env.NYXDB_BIN ||
-  path.join(__dirname, "..", "..", "target", "release", process.platform === "win32" ? "nyxdb.exe" : "nyxdb");
 const PORT = Number(process.env.OPS_PORT || 8292);
 const URL_BASE = `http://127.0.0.1:${PORT}`;
 const USER = "ops";
 const PASS = "ops-pass";
-const AUTH = "Basic " + Buffer.from(`${USER}:${PASS}`).toString("base64");
+const AUTH = basicAuth(USER, PASS);
 const ORIGIN = "http://app.test";
-
-let failures = 0;
-function check(name, condition, detail) {
-  if (condition) console.log(`PASS: ${name}`);
-  else {
-    console.error(`FAIL: ${name}${detail ? " — " + detail : ""}`);
-    failures++;
-  }
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function req(method, p, body) {
   const resp = await fetch(`${URL_BASE}${p}`, {
@@ -67,38 +53,27 @@ function stalledUpload(giveUpMs) {
   });
 }
 
-async function startServer(dataDir, logFile) {
+async function startServer(logFile) {
   const log = fs.openSync(logFile, "w");
-  const child = spawn(BIN, [], {
+  const server = await spawnServer({
+    port: PORT,
+    user: USER,
+    password: PASS,
+    stdio: ["ignore", log, log],
     env: {
-      ...process.env,
-      NYXDB_USER: USER,
-      NYXDB_PASSWORD: PASS,
-      NYXDB_DATA: dataDir,
-      NYXDB_ADDR: `127.0.0.1:${PORT}`,
       NYXDB_REQUEST_TIMEOUT_SECS: "2",
       NYXDB_MAX_CONCURRENT_REQUESTS: "1",
       NYXDB_CORS_ORIGINS: ORIGIN,
       RUST_LOG: "info,tower_http=debug",
       NO_COLOR: "1",
     },
-    stdio: ["ignore", log, log],
   });
-  const exited = new Promise((resolve) => child.once("exit", resolve));
-  for (let i = 0; i < 100; i++) {
-    try {
-      if ((await fetch(`${URL_BASE}/`)).ok) return { child, exited, log };
-    } catch {}
-    await sleep(50);
-  }
-  child.kill("SIGKILL");
-  throw new Error(`server did not start on port ${PORT}`);
+  return { ...server, log };
 }
 
 async function main() {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "nyxdb-ops-"));
-  const logFile = path.join(dataDir, "..", path.basename(dataDir) + ".log");
-  const server = await startServer(dataDir, logFile);
+  const logFile = path.join(os.tmpdir(), `nyxdb-ops-${process.pid}.log`);
+  const server = await startServer(logFile);
   try {
     await req("PUT", "/ops");
 
@@ -151,25 +126,12 @@ async function main() {
       `log tail: ${log.slice(-300)}`
     );
   } finally {
-    server.child.kill("SIGKILL");
-    await server.exited;
+    await server.stop();
     fs.closeSync(server.log);
-    for (let i = 0; i < 20; i++) {
-      try {
-        fs.rmSync(dataDir, { recursive: true, force: true });
-        fs.rmSync(logFile, { force: true });
-        break;
-      } catch {
-        await sleep(100);
-      }
-    }
+    fs.rmSync(logFile, { force: true, maxRetries: 10, retryDelay: 100 });
   }
 
-  if (failures > 0) {
-    console.error(`\n${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log("\nOperational limits hold");
+  finish("Operational limits hold");
 }
 
 main().catch((err) => {

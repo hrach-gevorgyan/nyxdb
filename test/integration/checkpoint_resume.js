@@ -14,56 +14,23 @@
 // Requires a built binary: NYXDB_BIN (default target/release/nyxdb[.exe]).
 
 const PouchDB = require("./pouchdb");
-const { spawn } = require("node:child_process");
 const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
+const { BIN, basicAuth, check, finish, spawnServer } = require("../lib/harness.js");
 
-const BIN =
-  process.env.NYXDB_BIN ||
-  path.join(__dirname, "..", "..", "target", "release", process.platform === "win32" ? "nyxdb.exe" : "nyxdb");
 const PORT = Number(process.env.CHECKPOINT_PORT || 8298);
 const BASE = `http://127.0.0.1:${PORT}`;
 const USER = "ckpt";
 const PASS = "ckpt-pass";
-const AUTH = "Basic " + Buffer.from(`${USER}:${PASS}`).toString("base64");
+const AUTH = basicAuth(USER, PASS);
 const DB = "resume";
 
-let failures = 0;
-function check(name, condition, detail) {
-  if (condition) console.log(`PASS: ${name}`);
-  else {
-    console.error(`FAIL: ${name}${detail ? " — " + detail : ""}`);
-    failures++;
-  }
-}
-
-async function startServer(dataDir) {
-  const child = spawn(BIN, [], {
-    env: { ...process.env, NYXDB_USER: USER, NYXDB_PASSWORD: PASS, NYXDB_DATA: dataDir, NYXDB_ADDR: `127.0.0.1:${PORT}` },
-    stdio: "ignore",
-  });
-  const exited = new Promise((resolve) => child.once("exit", resolve));
-  for (let i = 0; i < 100; i++) {
-    try {
-      if ((await fetch(`${BASE}/`)).ok) return { child, exited };
-    } catch {}
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  child.kill("SIGKILL");
-  throw new Error(`server did not start on port ${PORT}`);
-}
-
-async function stopServer(server) {
-  server.child.kill("SIGKILL");
-  await server.exited;
-}
+const startServer = (dataDir) => spawnServer({ port: PORT, user: USER, password: PASS, dataDir });
 
 async function main() {
   if (!fs.existsSync(BIN)) throw new Error(`no server binary at ${BIN} (build it, or set NYXDB_BIN)`);
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "nyxdb-checkpoint-"));
   const localName = "ckpt_local_" + Date.now();
-  let server = await startServer(dataDir);
+  let server = await startServer();
+  const dataDir = server.dataDir;
   const local = new PouchDB(localName);
   try {
     await fetch(`${BASE}/${DB}`, { method: "PUT", headers: { Authorization: AUTH } });
@@ -89,7 +56,7 @@ async function main() {
     const first = await PouchDB.replicate(remote, local);
     check("first pull copies all 20 docs", first.docs_written === 20, JSON.stringify(first));
 
-    await stopServer(server);
+    await server.stop({ keepData: true });
     server = await startServer(dataDir);
     const uuidAfter = (await (await fetch(`${BASE}/`)).json()).uuid;
     check("server uuid is the same after a restart", uuidBefore === uuidAfter, `${uuidBefore} -> ${uuidAfter}`);
@@ -103,16 +70,11 @@ async function main() {
       `_changes since values: ${JSON.stringify(changesSince)}, docs_written=${second.docs_written}`
     );
   } finally {
-    await stopServer(server);
+    await server.stop();
     await local.close().catch(() => {});
-    fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 
-  if (failures > 0) {
-    console.error(`\n${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log("\nReplication resumes from its checkpoint across a server restart");
+  finish("Replication resumes from its checkpoint across a server restart");
 }
 
 main().catch((err) => {

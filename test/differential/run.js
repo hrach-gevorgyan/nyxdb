@@ -16,9 +16,7 @@
 //   COUCH_URL     - real CouchDB, default http://127.0.0.1:5984
 //   COUCH_USER/COUCH_PASSWORD   - required, no default (must be your own admin creds)
 
-const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
-const OUR_USER = process.env.OUR_USER || "testuser";
-const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
+const { SERVER_URL, OUR_USER, OUR_PASSWORD } = require("../lib/harness.js");
 const COUCH_URL = process.env.COUCH_URL || "http://127.0.0.1:5984";
 const COUCH_USER = process.env.COUCH_USER;
 const COUCH_PASSWORD = process.env.COUCH_PASSWORD;

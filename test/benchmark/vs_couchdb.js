@@ -9,9 +9,7 @@
 //   COUCH_URL/COUCH_USER/COUCH_PASSWORD - default http://127.0.0.1:5984, no default creds (required)
 //   BENCH_DOC_COUNT                    - default 5000
 
-const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
-const OUR_USER = process.env.OUR_USER || "testuser";
-const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
+const { SERVER_URL, OUR_USER, OUR_PASSWORD } = require("../lib/harness.js");
 const COUCH_URL = process.env.COUCH_URL || "http://127.0.0.1:5984";
 const COUCH_USER = process.env.COUCH_USER;
 const COUCH_PASSWORD = process.env.COUCH_PASSWORD;

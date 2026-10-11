@@ -12,20 +12,7 @@
 // No dependencies (native fetch).
 // Requires: SERVER_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
 
-const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
-const OUR_USER = process.env.OUR_USER || "testuser";
-const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
-const AUTH = "Basic " + Buffer.from(`${OUR_USER}:${OUR_PASSWORD}`).toString("base64");
-
-let failures = 0;
-function check(name, condition, detail) {
-  if (condition) console.log(`PASS: ${name}`);
-  else {
-    console.error(`FAIL: ${name}${detail ? " — " + detail : ""}`);
-    failures++;
-  }
-}
-
+const { SERVER_URL, OUR_USER, OUR_PASSWORD, AUTH, check, finish } = require("../lib/harness.js");
 async function req(db, method, path, body) {
   const resp = await fetch(`${SERVER_URL}/${db}${path}`, {
     method,
@@ -118,11 +105,7 @@ async function main() {
     await req(db, "DELETE", "");
   }
 
-  if (failures > 0) {
-    console.error(`\n${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log("\nlongpoll/continuous heartbeat and timeout behave like CouchDB");
+  finish("longpoll/continuous heartbeat and timeout behave like CouchDB");
 }
 
 main().catch((err) => {

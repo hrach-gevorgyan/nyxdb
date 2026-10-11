@@ -17,31 +17,17 @@
 //
 // Requires a built binary: NYXDB_BIN (default target/release/nyxdb[.exe]).
 
-const { spawn } = require("node:child_process");
 const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
+const { BIN, basicAuth, check, finish, spawnServer } = require("../lib/harness.js");
 
-const BIN =
-  process.env.NYXDB_BIN ||
-  path.join(__dirname, "..", "..", "target", "release", process.platform === "win32" ? "nyxdb.exe" : "nyxdb");
 const PORT = Number(process.env.DURABILITY_PORT || 8299);
 const URL_BASE = `http://127.0.0.1:${PORT}`;
 const USER = "durability";
 const PASS = "durability-pass";
-const AUTH = "Basic " + Buffer.from(`${USER}:${PASS}`).toString("base64");
+const AUTH = basicAuth(USER, PASS);
 const ROUNDS = Number(process.env.DURABILITY_ROUNDS || 3);
 const WRITE_MS = Number(process.env.DURABILITY_WRITE_MS || 1500);
 const DB = "durable";
-
-let failures = 0;
-function check(name, condition, detail) {
-  if (condition) console.log(`PASS: ${name}`);
-  else {
-    console.error(`FAIL: ${name}${detail ? " — " + detail : ""}`);
-    failures++;
-  }
-}
 
 async function req(method, p, body) {
   const resp = await fetch(`${URL_BASE}/${DB}${p}`, {
@@ -52,21 +38,7 @@ async function req(method, p, body) {
   return { status: resp.status, body: await resp.json().catch(() => null) };
 }
 
-async function startServer(dataDir) {
-  const child = spawn(BIN, [], {
-    env: { ...process.env, NYXDB_USER: USER, NYXDB_PASSWORD: PASS, NYXDB_DATA: dataDir, NYXDB_ADDR: `127.0.0.1:${PORT}` },
-    stdio: "ignore",
-  });
-  const exited = new Promise((resolve) => child.once("exit", resolve));
-  for (let i = 0; i < 100; i++) {
-    try {
-      if ((await fetch(`${URL_BASE}/`)).ok) return { child, exited };
-    } catch {}
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  child.kill("SIGKILL");
-  throw new Error(`server did not start on port ${PORT}`);
-}
+const startServer = (dataDir) => spawnServer({ port: PORT, user: USER, password: PASS, dataDir });
 
 async function writeUntilKilled(server, round) {
   const acked = { docs: new Map(), locals: new Map() };
@@ -132,26 +104,20 @@ async function verify(round, acked) {
 
 async function main() {
   if (!fs.existsSync(BIN)) throw new Error(`no server binary at ${BIN} (build it, or set NYXDB_BIN)`);
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "nyxdb-durability-"));
+  let server = await startServer();
+  const dataDir = server.dataDir;
   try {
-    let server = await startServer(dataDir);
     await fetch(`${URL_BASE}/${DB}`, { method: "PUT", headers: { Authorization: AUTH } });
     for (let round = 1; round <= ROUNDS; round++) {
       const acked = await writeUntilKilled(server, round);
       server = await startServer(dataDir);
       await verify(round, acked);
     }
-    server.child.kill("SIGKILL");
-    await server.exited;
   } finally {
-    fs.rmSync(dataDir, { recursive: true, force: true });
+    await server.stop();
   }
 
-  if (failures > 0) {
-    console.error(`\n${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log("\nEvery acknowledged write survived a hard kill");
+  finish("Every acknowledged write survived a hard kill");
 }
 
 main().catch((err) => {

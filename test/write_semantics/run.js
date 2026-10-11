@@ -13,20 +13,7 @@
 // Requires: SERVER_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
 
 const PouchDB = require("../integration/pouchdb");
-
-const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
-const OUR_USER = process.env.OUR_USER || "testuser";
-const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
-const AUTH = "Basic " + Buffer.from(`${OUR_USER}:${OUR_PASSWORD}`).toString("base64");
-
-let failures = 0;
-function check(name, condition, detail) {
-  if (condition) console.log(`PASS: ${name}`);
-  else {
-    console.error(`FAIL: ${name}${detail ? " — " + detail : ""}`);
-    failures++;
-  }
-}
+const { SERVER_URL, OUR_USER, OUR_PASSWORD, AUTH, check, finish } = require("../lib/harness.js");
 
 async function req(db, method, path, body) {
   const resp = await fetch(`${SERVER_URL}/${db}${path}`, {
@@ -129,11 +116,7 @@ async function main() {
     await req(db, "DELETE", "");
   }
 
-  if (failures > 0) {
-    console.error(`\n${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log("\nWrite semantics match what CouchDB clients expect");
+  finish("Write semantics match what CouchDB clients expect");
 }
 
 main().catch((err) => {

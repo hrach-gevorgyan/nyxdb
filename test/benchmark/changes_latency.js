@@ -7,12 +7,9 @@
 //
 // Requires: SERVER_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
 
-const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
-const OUR_USER = process.env.OUR_USER || "testuser";
-const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
+const { SERVER_URL, OUR_USER, OUR_PASSWORD, AUTH } = require("../lib/harness.js");
 const SAMPLE_COUNT = Number(process.env.LATENCY_SAMPLES || 100);
 const DB_NAME = "latencytest_" + Date.now();
-const AUTH = "Basic " + Buffer.from(`${OUR_USER}:${OUR_PASSWORD}`).toString("base64");
 
 async function req(method, path, body) {
   const resp = await fetch(`${SERVER_URL}${path}`, {

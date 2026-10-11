@@ -15,19 +15,13 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      NYXDB_USER: ci
-      NYXDB_PASSWORD: ci-test-password
-      SERVER_URL: http://127.0.0.1:8085
-      TEST_USER: ci
-      TEST_PASSWORD: ci-test-password
-      OUR_USER: ci
-      OUR_PASSWORD: ci-test-password
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -38,91 +32,19 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
 
-      - name: Build (release)
-        run: cargo build --release --manifest-path db/Cargo.toml
-
-      - name: Unit tests
-        run: cargo test --release --manifest-path db/Cargo.toml
-
-      - name: Start server for HTTP-level tests
-        run: |
-          NYXDB_DATA=./data-ci NYXDB_ADDR=127.0.0.1:8085 ./target/release/nyxdb &
-          for i in $(seq 1 50); do
-            curl -sf http://127.0.0.1:8085/ > /dev/null && break
-            sleep 0.1
-          done
-
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Integration tests (real PouchDB client)
-        run: |
-          npm install --prefix test/integration
-          node test/integration/run.js
-          node test/integration/live_sync.js
-          node test/integration/edit_replication.js
-          node test/integration/delete_replication.js
-          node test/integration/checkpoint_resume.js
-          node test/integration/large_batches.js
+      - name: Install the PouchDB clients (8.x and 9.x)
+        run: npm install --prefix test/integration
 
-      - name: Integration tests on PouchDB 9.x (what Offlog ships)
-        env:
-          POUCHDB: "9"
-        run: |
-          node test/integration/run.js
-          node test/integration/live_sync.js
-          node test/integration/edit_replication.js
-          node test/integration/delete_replication.js
-          node test/integration/checkpoint_resume.js
-          node test/integration/large_batches.js
-          node test/write_semantics/run.js
-
-      - name: Startup failures exit cleanly
-        run: node test/startup/run.js
-
-      - name: Memory stays bounded as data grows
-        run: node test/memory/run.js
-
-      - name: Slow storage work does not stall other requests
-        run: node test/blocking/run.js
-
-      - name: Write semantics (_deleted, DELETE, _local revs)
-        run: node test/write_semantics/run.js
-
-      - name: Read endpoints (_all_docs, _design, db info, _changes limit)
-        run: node test/read_surface/run.js
-
-      - name: Databases are only created by PUT /{db}
-        run: node test/databases/run.js
-
-      - name: Acknowledged writes survive a hard kill
-        run: node test/durability/run.js
-
-      - name: Request timeout, concurrency limit, tracing, CORS max-age
-        run: node test/ops/run.js
-
-      - name: longpoll/continuous heartbeat and timeout
-        run: node test/feeds/run.js
-
-      - name: _changes followers never skip a change
-        run: node test/changes_follow/run.js
-
-      - name: Concurrent writers
-        run: node test/concurrency/run.js
-
-      - name: Revision history on read paths
-        run: node test/revisions/run.js
-
-      - name: Ported PouchDB test cases
-        run: node test/ported/pouchdb_tests.js
-
-      - name: Attachment tests
-        run: node test/attachments/run.js
-
-      - name: Load/soak test
-        run: node test/load/run.js
+      # Release build (zero warnings), clippy, unit tests, every suite
+      # against a scratch server, then the PouchDB-driven suites on 9.x.
+      # The same command runs it locally; see test/README.md.
+      - name: Full regression
+        run: node test/run_all.js
 
     # Differential and benchmark tests need a real CouchDB instance and
     # aren't run in CI — they're for local verification against a real

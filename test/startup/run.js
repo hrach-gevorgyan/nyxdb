@@ -17,20 +17,9 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const { BIN, check, finish } = require("../lib/harness.js");
 
-const BIN =
-  process.env.NYXDB_BIN ||
-  path.join(__dirname, "..", "..", "target", "release", process.platform === "win32" ? "nyxdb.exe" : "nyxdb");
 const PORT = Number(process.env.STARTUP_PORT || 8297);
-
-let failures = 0;
-function check(name, condition, detail) {
-  if (condition) console.log(`PASS: ${name}`);
-  else {
-    console.error(`FAIL: ${name}${detail ? " — " + detail : ""}`);
-    failures++;
-  }
-}
 
 function run(env) {
   return new Promise((resolve) => {
@@ -84,11 +73,7 @@ async function main() {
     fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 
-  if (failures > 0) {
-    console.error(`\n${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log("\nStartup failures exit cleanly with distinct codes");
+  finish("Startup failures exit cleanly with distinct codes");
 }
 
 main().catch((err) => {

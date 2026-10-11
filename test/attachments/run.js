@@ -6,22 +6,6 @@
 
 const PouchDB = require("../integration/pouchdb");
 
-const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
-const OUR_USER = process.env.OUR_USER || "testuser";
-const OUR_PASSWORD = process.env.OUR_PASSWORD || "testpass";
-const AUTH = "Basic " + Buffer.from(`${OUR_USER}:${OUR_PASSWORD}`).toString("base64");
-
-let failures = 0;
-
-function check(name, condition, detail) {
-  if (condition) {
-    console.log(`PASS: ${name}`);
-  } else {
-    console.error(`FAIL: ${name}${detail ? " — " + detail : ""}`);
-    failures++;
-  }
-}
-
 async function req(dbName, method, path, body, extraHeaders) {
   const resp = await fetch(`${SERVER_URL}/${dbName}${path}`, {
     method,
@@ -233,6 +217,7 @@ async function testConflictingBranchAttachments() {
 }
 
 const md5Digest = (s) => "md5-" + require("node:crypto").createHash("md5").update(s).digest("base64");
+const { SERVER_URL, OUR_USER, OUR_PASSWORD, AUTH, check, finish } = require("../lib/harness.js");
 
 // Stubs must carry CouchDB-style `md5-<base64>` digests (see
 // doc/changelog.md, v0.1.7): that's what PouchDB computes for its own
@@ -401,11 +386,7 @@ async function main() {
   await testRealPouchDBClient();
   await testConflictingBranchAttachments();
 
-  if (failures > 0) {
-    console.error(`\n${failures} check(s) failed`);
-    process.exit(1);
-  }
-  console.log("\nAll attachment tests pass");
+  finish("All attachment tests pass");
 }
 
 main().catch((err) => {

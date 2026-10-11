@@ -9,13 +9,10 @@
 // Expects the server running at SERVER_URL (default http://127.0.0.1:8085)
 // with NYXDB_USER/NYXDB_PASSWORD matching TEST_USER/TEST_PASSWORD.
 
-const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
-const TEST_USER = process.env.TEST_USER || "testuser";
-const TEST_PASSWORD = process.env.TEST_PASSWORD || "testpass";
+const { SERVER_URL, TEST_USER, TEST_PASSWORD, AUTH_HEADER } = require("../lib/harness.js");
 const BULK_SIZE = Number(process.env.LOAD_BULK_SIZE || 2000);
 const SUBSCRIBERS = Number(process.env.LOAD_SUBSCRIBERS || 20);
 const DB_NAME = "loadtest_" + Date.now();
-const AUTH_HEADER = "Basic " + Buffer.from(`${TEST_USER}:${TEST_PASSWORD}`).toString("base64");
 
 function fail(msg) {
   console.error("FAIL:", msg);
