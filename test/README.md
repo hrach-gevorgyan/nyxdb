@@ -5,6 +5,8 @@
   editing an already-replicated doc without creating phantom conflicts,
   and (`checkpoint_resume.js`, spawns its own server on port 8298)
   resuming from the replication checkpoint across a server restart.
+- `databases/` — only `PUT /{db}` creates a database, with a valid
+  name; every other route on a missing db is a 404.
 - `durability/` — spawns its own server, hard-kills it right after
   acknowledged writes, restarts it; every acknowledged write must
   survive. Needs the release binary (or `NYXDB_BIN`).
@@ -39,6 +41,9 @@ node test/integration/run.js
 node test/integration/live_sync.js
 node test/integration/edit_replication.js
 node test/integration/checkpoint_resume.js   # spawns its own server
+
+# Database creation and naming
+node test/databases/run.js
 
 # Hard-kill durability (spawns its own server on port 8299)
 node test/durability/run.js

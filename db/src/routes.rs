@@ -33,9 +33,20 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Opens an existing database. Only `PUT /{db}` creates one; every
+    /// other route on a db that doesn't exist gets CouchDB's 404 instead
+    /// of silently creating it (a typo'd db name in a sync URL used to
+    /// produce an empty db and a "successful" sync into it).
     fn db(&self, name: &str) -> Result<Db, ApiError> {
+        if !crate::storage::db_exists(&self.root, name) {
+            return Err(db_not_found());
+        }
         Db::open(&self.root, name, &self.locks).map_err(|_| internal_error())
     }
+}
+
+fn db_not_found() -> ApiError {
+    ApiError(StatusCode::NOT_FOUND, "not_found", "Database does not exist.")
 }
 
 /// CouchDB clients (PouchDB included) expect a JSON body on error
@@ -131,12 +142,17 @@ async fn create_db(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let docs_tree_name = format!("{db_name}::docs");
-    let existed = state.root.tree_names().iter().any(|n| n == docs_tree_name.as_bytes());
-    if existed {
-        return Err(ApiError(StatusCode::PRECONDITION_FAILED, "file_exists", "file_exists"));
+    if !crate::storage::valid_db_name(&db_name) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "illegal_database_name",
+            "Only lowercase characters (a-z), digits (0-9), and any of the characters _, $, (, ), +, -, and / are allowed. Must begin with a letter.",
+        ));
     }
-    state.db(&db_name)?;
+    if crate::storage::db_exists(&state.root, &db_name) {
+        return Err(ApiError(StatusCode::PRECONDITION_FAILED, "file_exists", "The database could not be created, the file already exists."));
+    }
+    Db::open(&state.root, &db_name, &state.locks).map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -158,10 +174,8 @@ async fn delete_db(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let docs_tree_name = format!("{db_name}::docs");
-    let existed = state.root.tree_names().iter().any(|n| n == docs_tree_name.as_bytes());
-    if !existed {
-        return Err(not_found());
+    if !crate::storage::db_exists(&state.root, &db_name) {
+        return Err(db_not_found());
     }
     for suffix in ["docs", "local", "seq", "seqidx", "attachments", "attmd5"] {
         state.root.drop_tree(format!("{db_name}::{suffix}")).map_err(|_| internal_error())?;

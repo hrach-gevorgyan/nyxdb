@@ -65,6 +65,9 @@ jobs:
           node test/integration/edit_replication.js
           node test/integration/checkpoint_resume.js
 
+      - name: Databases are only created by PUT /{db}
+        run: node test/databases/run.js
+
       - name: Acknowledged writes survive a hard kill
         run: node test/durability/run.js
 

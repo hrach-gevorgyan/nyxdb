@@ -364,6 +364,26 @@ impl Db {
 
 pub type SharedRoot = Arc<sled::Db>;
 
+/// CouchDB's database-name rule: starts with a lowercase letter, then
+/// lowercase letters, digits, and `_ $ ( ) + - /`, at most 238 chars.
+/// This also rules out `_`-prefixed system names (`_users`,
+/// `_replicator`) and `:`, which keeps names from colliding with this
+/// server's `{name}::{tree}` storage namespace.
+pub fn valid_db_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 238
+        && matches!(chars.next(), Some('a'..='z'))
+        && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '$' | '(' | ')' | '+' | '-' | '/'))
+}
+
+/// Whether `PUT /{name}` has created this database. `Db::open` creates
+/// whatever it opens, so every route except `PUT /{db}` must check this
+/// first.
+pub fn db_exists(base: &sled::Db, name: &str) -> bool {
+    let docs_tree = format!("{name}::docs");
+    base.tree_names().iter().any(|n| n == docs_tree.as_bytes())
+}
+
 /// This server's identity for `GET /`'s `uuid`, generated on first start
 /// and stored with the data, then reused forever. PouchDB builds its
 /// replication id from it, so a uuid that changed on every start (as it

@@ -64,7 +64,14 @@ curl http://127.0.0.1:5984/
 ```
 
 ### `PUT /{db}`
-Create a database. `412` if it already exists.
+Create a database. `412` if it already exists. Names follow CouchDB's
+rule: a lowercase letter first, then lowercase letters, digits, and
+`_ $ ( ) + - /` (max 238 chars); anything else, including `_`-prefixed
+system names, is `400 illegal_database_name`.
+
+This is the only route that creates a database. Every other route on a
+database that doesn't exist returns
+`404 {"error":"not_found","reason":"Database does not exist."}`.
 
 ```bash
 curl -u user:pass -X PUT http://127.0.0.1:5984/mydb

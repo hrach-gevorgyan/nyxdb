@@ -134,6 +134,17 @@ attachment-preserving edit" (real PouchDB pull, counting attachment
 GETs), missing stub → 412, bare stub kept — in
 `test/attachments/run.js`; legacy sha256 stub resolution as a unit test.
 
+**8. Every route created the database it named (medium).** Opening a
+db created its storage trees, so `GET /typo`, `PUT /typo/doc`,
+`_changes`, `_bulk_docs`… all quietly created `typo` — a mistyped db name
+in a sync URL produced an empty database and a "successful" sync into
+it. Now only `PUT /{db}` creates; everything else returns CouchDB's
+`404 "Database does not exist."`. Names are validated with CouchDB's
+rule (which also rejects `_users`/`_replicator` and anything with `:`,
+the separator in this server's storage namespace). Test:
+`test/databases/run.js` (11 routes on a missing db, 6 invalid names, one
+valid name using every allowed character class).
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a
