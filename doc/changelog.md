@@ -37,6 +37,32 @@ now covers seq assignment and publishing. Test:
 (a) makes the poller miss docs, breaking (b) makes the continuous
 follower miss docs.
 
+**3. Acknowledged writes could be lost on a hard kill (high).** sled
+flushes to disk only every ~500 ms in the background, no handler
+flushed, and Offlog stops NyxDB with TerminateProcess, so no shutdown
+hook ever ran. Reproduced by hard-killing the server right after
+acknowledged writes: dozens of acknowledged docs and every round's
+last acknowledged `_local` checkpoint were gone after restart. Now:
+
+- Every write handler (`PUT`, `_bulk_docs`, `_local`, attachment
+  `PUT`/`DELETE`) flushes to disk before acknowledging — once per
+  request, so a `_bulk_docs` batch costs one flush, not one per doc.
+- A doc's tree and its `_changes` entry are written in one sled
+  transaction, so a crash can't keep one without the other (a tree
+  with no seq entry would make `_revs_diff` say "have it" while
+  `_changes` never lists it — nobody would ever re-send or pull it).
+- Ctrl-C, Ctrl-Break, console close and system shutdown (SIGTERM on
+  Unix) flush and stop cleanly, with a 3 s grace period for open
+  connections (live `feed=continuous` clients never close on their own).
+
+Test: `test/durability/run.js` spawns its own server, writes as fast as
+it can, hard-kills it immediately after an acknowledgement, restarts,
+and checks every acknowledged doc and checkpoint. Fails before the fix
+and with `Db::flush` made a no-op. The signal-driven shutdown path
+isn't covered by an automated test (Windows console signals can't be
+sent to a background child process); a hard kill is the case that
+matters for Offlog and is what the test exercises.
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a

@@ -64,6 +64,9 @@ jobs:
           node test/integration/live_sync.js
           node test/integration/edit_replication.js
 
+      - name: Acknowledged writes survive a hard kill
+        run: node test/durability/run.js
+
       - name: _changes followers never skip a change
         run: node test/changes_follow/run.js
 

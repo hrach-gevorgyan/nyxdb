@@ -5,6 +5,8 @@
 use crate::changes::{ChangeEvent, ChangeFeed};
 use crate::revtree::{RevId, RevNode, RevTree};
 use bincode::Options;
+use sled::transaction::{ConflictableTransactionError, TransactionError};
+use sled::Transactional;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::collections::HashMap;
@@ -216,7 +218,6 @@ impl Db {
         let bytes = bincode_options()
             .serialize(&stored)
             .map_err(|e| StorageError::Corrupt(format!("failed to encode revtree for {doc_id:?}: {e}")))?;
-        self.docs.insert(doc_id, bytes)?;
         // `generate_id()` starts at 0, but `since=0` means "from the very
         // start" (no prior checkpoint) — real CouchDB's own convention,
         // where a seq token is never the same value as the "nothing seen
@@ -229,8 +230,32 @@ impl Db {
         // can safely mean only "nothing yet." Found live-testing; see
         // `doc/changelog.md`.
         let seq = self.base.generate_id()? + 1;
-        self.seq_log.insert(seq.to_be_bytes(), doc_id)?;
+        // The tree and its `_changes` entry land in one transaction. Written
+        // separately, a crash between them could keep the tree (so
+        // `_revs_diff` says "have it" and the client never re-sends) but
+        // lose the seq entry (so `_changes` never lists it and no other
+        // client ever pulls it).
+        (&self.docs, &self.seq_log)
+            .transaction(|(docs, seq_log)| -> Result<(), ConflictableTransactionError<()>> {
+                docs.insert(doc_id.as_bytes(), bytes.as_slice())?;
+                seq_log.insert(&seq.to_be_bytes(), doc_id.as_bytes())?;
+                Ok(())
+            })
+            .map_err(|e| match e {
+                TransactionError::Storage(e) => StorageError::Sled(e),
+                TransactionError::Abort(()) => StorageError::Corrupt(format!("write of {doc_id:?} aborted")),
+            })?;
         Ok(seq)
+    }
+
+    /// Forces everything written so far to disk. Call before acknowledging
+    /// a write: sled otherwise flushes only every ~500 ms in the
+    /// background, and Offlog stops this process with TerminateProcess —
+    /// no shutdown hook runs — so an "ok" response could describe data that
+    /// was never persisted (see doc/changelog.md, v0.1.7).
+    pub async fn flush(&self) -> StorageResult<()> {
+        self.base.flush_async().await?;
+        Ok(())
     }
 
     /// `_changes?since=N` support: every `(seq, doc_id)` entry with

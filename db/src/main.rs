@@ -60,6 +60,7 @@ async fn main() {
         config = config.compression_factor(level);
     }
     let root = Arc::new(config.open().expect("failed to open sled database"));
+    let flush_root = root.clone();
 
     let creds = Credentials::load_or_generate(Path::new(&data_dir)).expect("failed to load/generate credentials");
     tracing::info!(
@@ -107,5 +108,64 @@ async fn main() {
     let addr = std::env::var("NYXDB_ADDR").unwrap_or_else(|_| "127.0.0.1:5984".into());
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("failed to bind address");
     tracing::info!("listening on {addr}");
-    axum::serve(listener, app).await.expect("server error");
+
+    // Every write is already flushed before it's acknowledged (handlers
+    // call `Db::flush`), so a hard kill — which is how Offlog stops this
+    // process — loses nothing acknowledged. A clean stop flushes once more
+    // anyway. Live `feed=continuous` clients never close their connection
+    // on their own, so instead of waiting on them indefinitely, flush as
+    // soon as the signal arrives and give connections a short grace period.
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = axum::serve(listener, app).with_graceful_shutdown(async {
+        let _ = stop_rx.await;
+    });
+    let server = tokio::spawn(async move { server.await });
+    shutdown_signal().await;
+    tracing::info!("shutdown requested: flushing to disk");
+    if let Err(e) = flush_root.flush_async().await {
+        tracing::error!("flush on shutdown failed: {e}");
+    }
+    let _ = stop_tx.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
+    if let Err(e) = flush_root.flush_async().await {
+        tracing::error!("final flush failed: {e}");
+    }
+    tracing::info!("stopped");
+}
+
+/// Ctrl-C everywhere; on Windows also Ctrl-Break, console close, and
+/// system shutdown; on Unix also SIGTERM. TerminateProcess/SIGKILL can't
+/// be caught — that case is covered by flushing before every ack.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(windows)]
+    let platform = async {
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+        match (ctrl_break(), ctrl_close(), ctrl_shutdown()) {
+            (Ok(mut brk), Ok(mut close), Ok(mut shutdown)) => {
+                tokio::select! {
+                    _ = brk.recv() => {}
+                    _ = close.recv() => {}
+                    _ = shutdown.recv() => {}
+                }
+            }
+            _ => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(unix)]
+    let platform = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                term.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = platform => {}
+    }
 }

@@ -331,12 +331,14 @@ async fn put_doc(
             "invalid attachment data" => ApiError(StatusCode::BAD_REQUEST, "bad_request", "invalid attachment data"),
             _ => internal_error(),
         })?;
+        db.flush().await.map_err(|_| internal_error())?;
         return Ok(Json(json!({"ok": true, "id": id, "rev": rev})));
     }
 
     crate::attachments::extract_inline_attachments(&db, &mut body)
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "bad_request", "invalid attachment data"))?;
     let rev = write_doc(&db, &feed, &id, body).map_err(|_| internal_error())?;
+    db.flush().await.map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
 }
 
@@ -397,6 +399,7 @@ async fn put_attachment(
 
     let feed = state.feeds.get_or_create(&db_name);
     let rev = write_doc(&db, &feed, &id, doc_body).map_err(|_| internal_error())?;
+    db.flush().await.map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
 }
 
@@ -421,6 +424,7 @@ async fn delete_attachment(
     }
     let feed = state.feeds.get_or_create(&db_name);
     let rev = write_doc(&db, &feed, &id, body).map_err(|_| internal_error())?;
+    db.flush().await.map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
 }
 
@@ -449,6 +453,7 @@ async fn put_local(
     }
     let bytes = serde_json::to_vec(&body).map_err(|_| internal_error())?;
     db.local.insert(&id, bytes).map_err(|_| internal_error())?;
+    db.flush().await.map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true, "id": format!("_local/{id}"), "rev": "0-1"})))
 }
 
@@ -473,11 +478,14 @@ async fn bulk_docs(
         .ok_or(ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
     let new_edits = payload.get("new_edits").and_then(Value::as_bool).unwrap_or(true);
 
-    if new_edits {
+    let response = if new_edits {
         bulk_docs_new_edits_true(&db, &feed, docs)
     } else {
         bulk_docs_new_edits_false(&db, &feed, docs)
-    }
+    }?;
+    // One flush per batch, before acknowledging any of it.
+    db.flush().await.map_err(|_| internal_error())?;
+    Ok(response)
 }
 
 fn bulk_docs_new_edits_true(db: &Db, feed: &ChangeFeed, docs: &[Value]) -> Result<Json<Value>, ApiError> {

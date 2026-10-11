@@ -3,6 +3,9 @@
 - `integration/` — drives a real PouchDB client against a running
   server instance: one-shot replication, `live:true` two-device sync, and
   editing an already-replicated doc without creating phantom conflicts.
+- `durability/` — spawns its own server, hard-kills it right after
+  acknowledged writes, restarts it; every acknowledged write must
+  survive. Needs the release binary (or `NYXDB_BIN`).
 - `changes_follow/` — polling and continuous `_changes` followers
   while many writers run; neither may miss a change.
 - `concurrency/` — many simultaneous writes to the same doc; every
@@ -33,6 +36,9 @@ cargo test --manifest-path db/Cargo.toml
 node test/integration/run.js
 node test/integration/live_sync.js
 node test/integration/edit_replication.js
+
+# Hard-kill durability (spawns its own server on port 8299)
+node test/durability/run.js
 
 # _changes followers under concurrent writes
 node test/changes_follow/run.js
