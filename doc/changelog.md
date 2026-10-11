@@ -270,6 +270,21 @@ Test: `test/read_surface/run.js` (all 7 checks fail before the fix).
   `test/attachments/run.js` (replaced bytes gone, current and
   conflict-branch bytes kept).
 
+**Found while benchmarking: bulk writes were 27× slower than v0.1.6.**
+The durability fix (#3) wrote every doc of a `_bulk_docs` in its own
+sled transaction. sled 0.34 pays ~0.5 ms per transaction at the next
+flush, and the batch is flushed before it's acknowledged, so a 2,000-doc
+batch took ~1.4 s (v0.1.6: ~60 ms), and a replication push paid ~50 ms
+extra per 100-doc batch. `_bulk_docs` now writes through
+`Db::try_update_trees`: one lock, transactions of up to 128 docs (each
+doc's tree and `_changes` entry still together; a transaction holds its
+writes in memory, hence the cap). A 2,000-doc batch is back to ~60 ms.
+Peak memory writing 100 MB is now lower than before (~100 MB vs ~105 MB
+at 1,000-doc batches; 88 MB vs v0.1.6's 170 MB at PouchDB's 100). Tests:
+`test/perf/run.js` (2,000-doc app batch and replication push each under
+400 ms; ~1.4 s before), unit tests for batches with repeated ids, inside
+one chunk and across chunks.
+
 **LOW: operational limits.**
 
 - No request timeout: a client that stalled mid-upload held its buffer

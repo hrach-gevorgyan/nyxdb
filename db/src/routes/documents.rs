@@ -290,22 +290,26 @@ pub(super) fn take_write_meta(body: &mut Value) -> (Option<String>, bool) {
 /// (see doc/USAGE.md §7). `_deleted:true` writes a tombstone.
 pub(super) fn write_doc(db: &Db, feed: &ChangeFeed, id: &str, mut body: Value) -> StorageResult<String> {
     let (requested_parent, deleted) = take_write_meta(&mut body);
-    db.update_tree(id, feed, |tree| {
-        let parent = match requested_parent {
-            Some(rev) if tree.is_leaf(&rev) => Some(rev),
-            _ => tree.winner().cloned(),
-        };
-        let gen = parent
-            .as_ref()
-            .and_then(|r| r.split_once('-'))
-            .and_then(|(g, _)| g.parse::<u64>().ok())
-            .unwrap_or(0)
-            + 1;
-        let rev = format!("{gen}-{:x}", rev_hash(parent.as_deref(), deleted, &body));
-        tree.nodes.insert(rev.clone(), RevNode { parent, deleted, body });
-        rev
-    })
-    .map(|(_, rev)| rev)
+    db.update_tree(id, feed, |tree| apply_app_write(tree, requested_parent, deleted, body)).map(|(_, rev)| rev)
+}
+
+/// The in-lock half of an app write: picks the parent (the requested
+/// `_rev` if it's a current leaf, else the winner), mints the new rev and
+/// adds it. Shared by `write_doc` and `_bulk_docs`.
+pub(super) fn apply_app_write(tree: &mut RevTree, requested_parent: Option<String>, deleted: bool, body: Value) -> String {
+    let parent = match requested_parent {
+        Some(rev) if tree.is_leaf(&rev) => Some(rev),
+        _ => tree.winner().cloned(),
+    };
+    let gen = parent
+        .as_ref()
+        .and_then(|r| r.split_once('-'))
+        .and_then(|(g, _)| g.parse::<u64>().ok())
+        .unwrap_or(0)
+        + 1;
+    let rev = format!("{gen}-{:x}", rev_hash(parent.as_deref(), deleted, &body));
+    tree.nodes.insert(rev.clone(), RevNode { parent, deleted, body });
+    rev
 }
 
 #[derive(serde::Deserialize)]

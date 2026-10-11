@@ -114,6 +114,9 @@ impl TryFrom<StoredTree> for RevTree {
     }
 }
 
+/// Most docs `Db::try_update_trees` writes in one transaction.
+const BATCH_CHUNK: usize = 128;
+
 /// One write lock per database, shared across requests (a `Db` is opened
 /// fresh per request, so the lock has to live somewhere longer-lived —
 /// `AppState`). See `Db::update_tree` for why it exists.
@@ -344,57 +347,127 @@ impl Db {
         feed: &ChangeFeed,
         modify: impl FnOnce(&mut RevTree) -> Result<T, E>,
     ) -> StorageResult<Result<(u64, T), E>> {
-        let _guard = self.write_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut tree = self.get_tree(doc_id)?.unwrap_or_default();
-        let out = match modify(&mut tree) {
-            Ok(out) => out,
-            Err(e) => return Ok(Err(e)),
-        };
-        tree.prune(REVS_LIMIT);
-        let seq = self.put_tree(doc_id, &tree)?;
-        feed.publish(ChangeEvent { seq, doc_id: doc_id.to_string() });
-        Ok(Ok((seq, out)))
+        let mut modify = Some(modify);
+        let mut results = self.try_update_trees(&[doc_id], feed, |_, tree| (modify.take().expect("called once"))(tree))?;
+        Ok(results.pop().expect("one result per doc"))
     }
 
-    fn put_tree(&self, doc_id: &str, tree: &RevTree) -> StorageResult<u64> {
-        let stored = StoredTree::try_from(tree)
-            .map_err(|e| StorageError::Corrupt(format!("failed to encode doc body for {doc_id:?}: {e}")))?;
-        let bytes = bincode_options()
-            .serialize(&stored)
-            .map_err(|e| StorageError::Corrupt(format!("failed to encode revtree for {doc_id:?}: {e}")))?;
-        // `generate_id()` starts at 0, but `since=0` means "from the very
-        // start" (no prior checkpoint) — real CouchDB's own convention,
-        // where a seq token is never the same value as the "nothing seen
-        // yet" starting point. `changes_since` correctly treats `since` as
-        // exclusive (`seq > since`), so a raw 0 here would make the very
-        // first document ever written to a fresh database permanently
-        // invisible to any `_changes?since=0` poll — which is what every
-        // fresh `db.sync()` starts with. Shifting by 1 keeps persisted seq
-        // values in 1..=u64::MAX, so 0 is never a real assigned value and
-        // can safely mean only "nothing yet." Found live-testing; see
-        // `doc/changelog.md`.
-        let seq = self.base.generate_id()? + 1;
-        // The tree and its `_changes` entry land in one transaction. Written
-        // separately, a crash between them could keep the tree (so
-        // `_revs_diff` says "have it" and the client never re-sends) but
-        // lose the seq entry (so `_changes` never lists it and no other
-        // client ever pulls it). The doc's previous `_changes` entry is
-        // removed in the same transaction: one entry per doc, so `seq_log`
-        // is bounded by the doc count instead of growing with every write.
+    /// Several writes in one go — a `_bulk_docs` batch: `modify(i, tree)`
+    /// is called for `doc_ids[i]`, in order, under one hold of the write
+    /// lock, and what succeeds is written in transactions of up to
+    /// `BATCH_CHUNK` docs.
+    ///
+    /// Not one transaction per doc: sled 0.34 pays ~0.5 ms per transaction
+    /// at the next flush, and a batch is flushed before it's acknowledged,
+    /// so per-doc transactions made a 2,000-doc batch take ~1.4 s (see
+    /// `doc/changelog.md`). Not one for the whole batch either: a
+    /// transaction holds all its writes in memory until it commits. Each
+    /// doc's tree and `_changes` entry are always in the same transaction.
+    /// An id may appear more than once; later entries see earlier ones.
+    pub fn try_update_trees<T, E>(
+        &self,
+        doc_ids: &[&str],
+        feed: &ChangeFeed,
+        mut modify: impl FnMut(usize, &mut RevTree) -> Result<T, E>,
+    ) -> StorageResult<Vec<Result<(u64, T), E>>> {
+        let _guard = self.write_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Latest tree and seq of every doc this batch touched, in first-touch order.
+        let mut pending: Vec<(&str, RevTree, u64)> = Vec::new();
+        let mut slots: HashMap<&str, usize> = HashMap::new();
+        let mut results = Vec::with_capacity(doc_ids.len());
+        for (i, &doc_id) in doc_ids.iter().enumerate() {
+            let slot = slots.get(doc_id).copied();
+            let mut tree = match slot {
+                Some(slot) => pending[slot].1.clone(),
+                None => self.get_tree(doc_id)?.unwrap_or_default(),
+            };
+            match modify(i, &mut tree) {
+                Ok(out) => {
+                    tree.prune(REVS_LIMIT);
+                    let seq = self.next_seq()?;
+                    match slot {
+                        Some(slot) => pending[slot] = (doc_id, tree, seq),
+                        None => {
+                            slots.insert(doc_id, pending.len());
+                            pending.push((doc_id, tree, seq));
+                        }
+                    }
+                    results.push(Ok((seq, out)));
+                }
+                Err(e) => results.push(Err(e)),
+            }
+            if pending.len() >= BATCH_CHUNK {
+                self.commit_chunk(&mut pending, feed)?;
+                slots.clear(); // later entries for these ids read them back from storage
+            }
+        }
+        self.commit_chunk(&mut pending, feed)?;
+        Ok(results)
+    }
+
+    fn commit_chunk(&self, pending: &mut Vec<(&str, RevTree, u64)>, feed: &ChangeFeed) -> StorageResult<()> {
+        if pending.is_empty() {
+            return Ok(());
+        }
+        self.put_trees(pending)?;
+        let mut events: Vec<_> = pending.iter().map(|(id, _, seq)| ChangeEvent { seq: *seq, doc_id: id.to_string() }).collect();
+        events.sort_by_key(|e| e.seq);
+        for event in events {
+            feed.publish(event);
+        }
+        pending.clear();
+        Ok(())
+    }
+
+    /// `generate_id()` starts at 0, but `since=0` means "from the very
+    /// start" (no prior checkpoint) — real CouchDB's own convention,
+    /// where a seq token is never the same value as the "nothing seen
+    /// yet" starting point. `changes_since` correctly treats `since` as
+    /// exclusive (`seq > since`), so a raw 0 here would make the very
+    /// first document ever written to a fresh database permanently
+    /// invisible to any `_changes?since=0` poll — which is what every
+    /// fresh `db.sync()` starts with. Shifting by 1 keeps persisted seq
+    /// values in 1..=u64::MAX, so 0 is never a real assigned value and
+    /// can safely mean only "nothing yet." Found live-testing; see
+    /// `doc/changelog.md`.
+    fn next_seq(&self) -> StorageResult<u64> {
+        Ok(self.base.generate_id()? + 1)
+    }
+
+    /// Writes each doc's tree and its `_changes` entry in one transaction.
+    /// Written separately, a crash between them could keep the tree (so
+    /// `_revs_diff` says "have it" and the client never re-sends) but lose
+    /// the seq entry (so `_changes` never lists it and no other client ever
+    /// pulls it). Each doc's previous `_changes` entry is removed in the
+    /// same transaction: one entry per doc, so `seq_log` is bounded by the
+    /// doc count instead of growing with every write.
+    fn put_trees(&self, writes: &[(&str, RevTree, u64)]) -> StorageResult<()> {
+        let encoded = writes
+            .iter()
+            .map(|(doc_id, tree, seq)| {
+                let stored = StoredTree::try_from(tree)
+                    .map_err(|e| StorageError::Corrupt(format!("failed to encode doc body for {doc_id:?}: {e}")))?;
+                let bytes = bincode_options()
+                    .serialize(&stored)
+                    .map_err(|e| StorageError::Corrupt(format!("failed to encode revtree for {doc_id:?}: {e}")))?;
+                Ok((*doc_id, bytes, *seq))
+            })
+            .collect::<StorageResult<Vec<_>>>()?;
         (&self.docs, &self.seq_log, &self.seq_by_doc)
             .transaction(|(docs, seq_log, seq_by_doc)| -> Result<(), ConflictableTransactionError<()>> {
-                docs.insert(doc_id.as_bytes(), bytes.as_slice())?;
-                if let Some(previous) = seq_by_doc.insert(doc_id.as_bytes(), &seq.to_be_bytes())? {
-                    seq_log.remove(previous.as_ref())?;
+                for (doc_id, bytes, seq) in &encoded {
+                    docs.insert(doc_id.as_bytes(), bytes.as_slice())?;
+                    if let Some(previous) = seq_by_doc.insert(doc_id.as_bytes(), &seq.to_be_bytes())? {
+                        seq_log.remove(previous.as_ref())?;
+                    }
+                    seq_log.insert(&seq.to_be_bytes(), doc_id.as_bytes())?;
                 }
-                seq_log.insert(&seq.to_be_bytes(), doc_id.as_bytes())?;
                 Ok(())
             })
             .map_err(|e| match e {
                 TransactionError::Storage(e) => StorageError::Sled(e),
-                TransactionError::Abort(()) => StorageError::Corrupt(format!("write of {doc_id:?} aborted")),
-            })?;
-        Ok(seq)
+                TransactionError::Abort(()) => StorageError::Corrupt("batch write aborted".to_string()),
+            })
     }
 
     /// Forces everything written so far to disk. Call before acknowledging
@@ -641,5 +714,62 @@ mod tests {
         assert!(db.get_attachment(&digest(&old)).unwrap().is_none());
         assert_eq!(db.attachments.len(), 2);
         assert_eq!(db.compact_attachments().unwrap(), 0);
+    }
+
+    /// A batch writes in one transaction but must behave like the same
+    /// writes made one by one: a repeated id sees its earlier change, a
+    /// failed entry writes nothing, and each doc ends with one `_changes`
+    /// entry at its last write.
+    #[test]
+    fn a_batch_behaves_like_sequential_writes() {
+        let base = sled::Config::new().temporary(true).open().unwrap();
+        let db = Db::open(&base, "batch", &WriteLocks::default()).unwrap();
+        let feed = ChangeFeed::default();
+        let ids = ["a", "b", "a", "c"];
+        let results = db
+            .try_update_trees(&ids, &feed, |i, tree| {
+                if ids[i] == "c" {
+                    return Err("rejected");
+                }
+                let parent = tree.winner().cloned();
+                let gen = parent.as_ref().map_or(1, |p| p[..1].parse::<u64>().unwrap() + 1);
+                let rev = format!("{gen}-{i}");
+                tree.nodes.insert(rev.clone(), RevNode { parent, deleted: false, body: serde_json::json!({ "i": i }) });
+                Ok(rev)
+            })
+            .unwrap();
+        let revs: Vec<_> = results.iter().map(|r| r.as_ref().map(|(_, rev)| rev.clone()).map_err(|e| *e)).collect();
+        assert_eq!(revs, vec![Ok("1-0".to_string()), Ok("1-1".to_string()), Ok("2-2".to_string()), Err("rejected")]);
+        assert_eq!(db.get_tree("a").unwrap().unwrap().winner().map(String::as_str), Some("2-2"));
+        assert!(db.get_tree("c").unwrap().is_none());
+        let changes = db.changes_since(0).unwrap();
+        let ids_in_changes: Vec<_> = changes.iter().map(|(_, id)| id.as_str()).collect();
+        assert_eq!(ids_in_changes, vec!["b", "a"], "one entry per doc, at its last write");
+        assert_eq!(changes[1].0, results[2].as_ref().unwrap().0, "a's entry is its second write's seq");
+    }
+
+    /// A batch longer than one transaction chunk: a doc written again
+    /// after its first write was committed must build on that write.
+    #[test]
+    fn a_batch_spanning_chunks_keeps_every_write() {
+        let base = sled::Config::new().temporary(true).open().unwrap();
+        let db = Db::open(&base, "chunks", &WriteLocks::default()).unwrap();
+        let feed = ChangeFeed::default();
+        let docs = BATCH_CHUNK + 22;
+        let ids: Vec<String> = (0..2 * docs).map(|i| format!("d{}", i % docs)).collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        db.try_update_trees(&id_refs, &feed, |i, tree| {
+            let parent = tree.winner().cloned();
+            let gen = if parent.is_some() { 2 } else { 1 };
+            tree.nodes.insert(format!("{gen}-{i}"), RevNode { parent, deleted: false, body: serde_json::json!({}) });
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        for id in &ids[..docs] {
+            let tree = db.get_tree(id).unwrap().unwrap();
+            assert!(tree.winner().unwrap().starts_with("2-"), "{id} lost its first write: {:?}", tree.leaves());
+            assert_eq!(tree.leaves().len(), 1, "{id} branched");
+        }
+        assert_eq!(db.changes_since(0).unwrap().len(), docs);
     }
 }

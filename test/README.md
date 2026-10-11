@@ -24,6 +24,8 @@
 - `durability/` — spawns its own server, hard-kills it right after
   acknowledged writes, restarts it; every acknowledged write must
   survive. Needs the release binary (or `NYXDB_BIN`).
+- `perf/` — throughput guards with a wide margin: a 2,000-doc
+  `_bulk_docs` (app writes and replication push) must take under 400 ms.
 - `ops/` — spawns its own server (port 8292) with tiny limits: request
   timeout, concurrency limit, `_changes` exempt from both, request
   tracing, CORS preflight `max-age`. Needs the release binary.

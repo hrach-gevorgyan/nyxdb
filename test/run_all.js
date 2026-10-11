@@ -35,6 +35,7 @@ const SUITES = [
   "test/feeds/run.js",
   "test/revisions/run.js",
   "test/concurrency/run.js",
+  "test/perf/run.js",
   "test/ported/pouchdb_tests.js",
   "test/attachments/run.js",
   "test/load/run.js",
@@ -113,6 +114,7 @@ async function suites(server) {
 }
 
 async function main() {
+  if (filters.length && !selected(SUITES).length) throw new Error(`no suite matches ${filters.join(", ")}`);
   if (rust && !rustChecks()) return;
   const logFile = path.join(os.tmpdir(), `nyxdb-run-all-${process.pid}.log`);
   const log = fs.openSync(logFile, "w");

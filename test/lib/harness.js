@@ -66,10 +66,10 @@ function residentMB(pid) {
 /// passed to spawn (default: ignored). Returns
 /// `{ url, child, exited, dataDir, stop() }`; `stop()` hard-kills the
 /// process and, unless `keepData`, deletes the data dir.
-async function spawnServer({ port, user = "test", password = "test-pass", env = {}, stdio = "ignore", dataDir } = {}) {
+async function spawnServer({ port, user = "test", password = "test-pass", env = {}, stdio = "ignore", dataDir, bin = BIN } = {}) {
   dataDir = dataDir || fs.mkdtempSync(path.join(os.tmpdir(), "nyxdb-test-"));
   const url = `http://127.0.0.1:${port}`;
-  const child = spawn(BIN, [], {
+  const child = spawn(bin, [], {
     env: { ...process.env, NYXDB_USER: user, NYXDB_PASSWORD: password, NYXDB_DATA: dataDir, NYXDB_ADDR: `127.0.0.1:${port}`, ...env },
     stdio,
   });

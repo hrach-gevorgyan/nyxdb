@@ -37,7 +37,11 @@ pub(super) async fn bulk_docs(
 }
 
 pub(super) fn bulk_docs_new_edits_true(db: &Db, feed: &ChangeFeed, docs: &[Value]) -> Result<Json<Value>, ApiError> {
-    let mut results = Vec::with_capacity(docs.len());
+    // Validate and store attachments first, then write every doc that
+    // passed in one batch (one transaction — see `Db::try_update_trees`).
+    let mut results: Vec<Option<Value>> = Vec::with_capacity(docs.len());
+    let mut writes = Vec::new();
+    let mut payloads = Vec::new();
     for doc in docs {
         let mut doc = doc.clone();
         let id = doc
@@ -45,74 +49,93 @@ pub(super) fn bulk_docs_new_edits_true(db: &Db, feed: &ChangeFeed, docs: &[Value
             .and_then(Value::as_str)
             .map(String::from)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        // `_rev`/`_deleted` stay in: write_doc reads and strips them.
         if let Some(obj) = doc.as_object_mut() {
             obj.remove("_id");
         }
-
         let previous = current_body(db, &id);
         match crate::attachments::extract_inline_attachments(db, &mut doc, previous.as_ref()) {
             Ok(()) => {}
             Err(crate::attachments::AttachmentError::Invalid) => {
-                results.push(json!({"id": id, "error": "bad_request", "reason": "invalid attachment data"}));
+                results.push(Some(json!({"id": id, "error": "bad_request", "reason": "invalid attachment data"})));
                 continue;
             }
             Err(crate::attachments::AttachmentError::MissingStub(reason)) => {
-                results.push(json!({"id": id, "error": "missing_stub", "reason": reason}));
+                results.push(Some(json!({"id": id, "error": "missing_stub", "reason": reason})));
                 continue;
             }
         }
-
-        match write_doc(db, feed, &id, doc) {
-            Ok(rev) => results.push(json!({"ok": true, "id": id, "rev": rev})),
-            Err(_) => results.push(json!({
-                "id": id,
-                "error": "internal_error",
-                "reason": "failed to write document",
-            })),
-        }
+        let (requested_parent, deleted) = take_write_meta(&mut doc);
+        writes.push((results.len(), id));
+        payloads.push(Some((requested_parent, deleted, doc)));
+        results.push(None);
     }
-    Ok(Json(Value::Array(results)))
+
+    let ids: Vec<&str> = writes.iter().map(|(_, id)| id.as_str()).collect();
+    let written = db.try_update_trees(&ids, feed, |i, tree| {
+        let (requested_parent, deleted, body) = payloads[i].take().expect("each write is applied once");
+        Ok::<_, std::convert::Infallible>(apply_app_write(tree, requested_parent, deleted, body))
+    });
+    for (n, (slot, id)) in writes.iter().enumerate() {
+        results[*slot] = Some(match &written {
+            Ok(written) => match &written[n] {
+                Ok((_, rev)) => json!({"ok": true, "id": id, "rev": rev}),
+                Err(never) => match *never {},
+            },
+            Err(_) => json!({"id": id, "error": "internal_error", "reason": "failed to write document"}),
+        });
+    }
+    Ok(Json(Value::Array(results.into_iter().map(|r| r.expect("every doc has a result")).collect())))
 }
 
 /// Real CouchDB returns `[]` on a fully successful `new_edits:false`
 /// push (the rev is dictated by the client, so there's nothing new to
 /// report) — only failures show up in the response array.
 pub(super) fn bulk_docs_new_edits_false(db: &Db, feed: &ChangeFeed, docs: &[Value]) -> Result<Json<Value>, ApiError> {
+    let error_row = |id: &str, reason: &'static str| {
+        let error = match reason {
+            "failed to write document" => "internal_error",
+            "missing_stub" => "missing_stub",
+            _ => "bad_request",
+        };
+        json!({"id": id, "error": error, "reason": reason})
+    };
     let mut errors = Vec::new();
+    let mut ids = Vec::new();
+    let mut payloads = Vec::new();
     for doc in docs {
         let Some(id) = doc.get("_id").and_then(Value::as_str).map(String::from) else {
             errors.push(json!({"error": "bad_request", "reason": "missing _id"}));
             continue;
         };
-        if let Err(reason) = write_doc_new_edits_false(db, feed, &id, doc) {
-            let error = match reason {
-                "failed to write document" => "internal_error",
-                "missing_stub" => "missing_stub",
-                _ => "bad_request",
-            };
-            errors.push(json!({"id": id, "error": error, "reason": reason}));
+        match prepare_new_edits_false(db, doc) {
+            Ok(prepared) => {
+                ids.push(id);
+                payloads.push(Some(prepared));
+            }
+            Err(reason) => errors.push(error_row(&id, reason)),
         }
+    }
+    let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let written = db.try_update_trees(&id_refs, feed, |i, tree| {
+        let (chain, deleted, body) = payloads[i].take().expect("each write is applied once");
+        tree.insert_revision_chain(&chain, deleted, body);
+        Ok::<_, std::convert::Infallible>(())
+    });
+    if written.is_err() {
+        errors.extend(ids.iter().map(|id| error_row(id, "failed to write document")));
     }
     Ok(Json(Value::Array(errors)))
 }
 
-/// Shared by `_bulk_docs` (`new_edits:false`) and single-doc `PUT
-/// ?new_edits=false`: inserts the client-dictated `_rev`/`_revisions`
-/// chain into the document's revision tree verbatim, exactly as real
-/// replication does — this is what makes a diverging push create a
-/// genuine conflict instead of silently overwriting. Never mints a new
-/// revision itself; the caller supplies the exact one to store.
-pub(super) fn write_doc_new_edits_false(
-    db: &Db,
-    feed: &ChangeFeed,
-    id: &str,
-    doc: &Value,
-) -> Result<String, &'static str> {
+/// A `new_edits:false` doc, ready to insert: its revision chain (newest
+/// first), deleted flag, and body with metadata removed and inline
+/// attachments stored.
+type PreparedRevision = (Vec<crate::revtree::RevId>, bool, Value);
+
+fn prepare_new_edits_false(db: &Db, doc: &Value) -> Result<PreparedRevision, &'static str> {
     let Some(chain) = revision_chain(doc) else {
         return Err("missing _rev");
     };
-    let rev = chain[0].clone();
     let deleted = doc.get("_deleted").and_then(Value::as_bool).unwrap_or(false);
     let mut body = doc.clone();
     if let Some(obj) = body.as_object_mut() {
@@ -125,7 +148,22 @@ pub(super) fn write_doc_new_edits_false(
         crate::attachments::AttachmentError::Invalid => "invalid attachment data",
         crate::attachments::AttachmentError::MissingStub(_) => "missing_stub",
     })?;
+    Ok((chain, deleted, body))
+}
 
+/// Single-doc `PUT ?new_edits=false`: inserts the client-dictated
+/// `_rev`/`_revisions` chain into the document's revision tree verbatim,
+/// exactly as real replication does — this is what makes a diverging
+/// push create a genuine conflict instead of silently overwriting. Never
+/// mints a new revision itself.
+pub(super) fn write_doc_new_edits_false(
+    db: &Db,
+    feed: &ChangeFeed,
+    id: &str,
+    doc: &Value,
+) -> Result<String, &'static str> {
+    let (chain, deleted, body) = prepare_new_edits_false(db, doc)?;
+    let rev = chain[0].clone();
     db.update_tree(id, feed, |tree| tree.insert_revision_chain(&chain, deleted, body))
         .map(|_| rev)
         .map_err(|_| "failed to write document")
