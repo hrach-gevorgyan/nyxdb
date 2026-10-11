@@ -55,6 +55,7 @@ cargo test --manifest-path db/Cargo.toml
 node test/integration/run.js
 node test/integration/live_sync.js
 node test/integration/edit_replication.js
+node test/integration/delete_replication.js
 node test/integration/checkpoint_resume.js   # spawns its own server
 node test/integration/large_batches.js       # also spawns a small-limit server
 

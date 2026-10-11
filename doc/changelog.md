@@ -225,6 +225,10 @@ just-under and just-over a small limit on a self-spawned server).
   now get `0-N` (incremented atomically) and have `DELETE`.
 
 Test: `test/write_semantics/run.js` (all 9 checks fail before the fix).
+And `test/integration/delete_replication.js`: a deletion made on one
+PouchDB client, and one made with `DELETE` on the server, reach clients
+that already hold the doc as a single deleted leaf with full history (the
+server-side half failed before, with a 405).
 
 **LOW: read endpoints.**
 
