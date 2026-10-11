@@ -102,6 +102,15 @@ the v0.1.6 known gap where empty ancestor placeholders reported
 `prune_*` (revtree), and long-history/non-leaf checks in
 `test/revisions/run.js`.
 
+**6. The server uuid changed on every start (medium).** `GET /`'s
+`uuid` was a fresh random value per process. PouchDB builds its
+replication id from it, so after every restart every client had a new
+replication id, found no checkpoint, and re-synced from `since=0`.
+Reproduced with a real PouchDB pull across a restart: the second pull
+asked for `_changes?since=0`. The uuid is now generated once and stored
+with the data. Tests: `test/integration/checkpoint_resume.js` (spawns
+its own server) and `server_uuid_survives_a_restart` (storage).
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a

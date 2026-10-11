@@ -2,7 +2,9 @@
 
 - `integration/` — drives a real PouchDB client against a running
   server instance: one-shot replication, `live:true` two-device sync, and
-  editing an already-replicated doc without creating phantom conflicts.
+  editing an already-replicated doc without creating phantom conflicts,
+  and (`checkpoint_resume.js`, spawns its own server on port 8298)
+  resuming from the replication checkpoint across a server restart.
 - `durability/` — spawns its own server, hard-kills it right after
   acknowledged writes, restarts it; every acknowledged write must
   survive. Needs the release binary (or `NYXDB_BIN`).
@@ -36,6 +38,7 @@ cargo test --manifest-path db/Cargo.toml
 node test/integration/run.js
 node test/integration/live_sync.js
 node test/integration/edit_replication.js
+node test/integration/checkpoint_resume.js   # spawns its own server
 
 # Hard-kill durability (spawns its own server on port 8299)
 node test/durability/run.js

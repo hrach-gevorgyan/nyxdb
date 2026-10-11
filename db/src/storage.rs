@@ -344,6 +344,30 @@ impl Db {
 
 pub type SharedRoot = Arc<sled::Db>;
 
+/// This server's identity for `GET /`'s `uuid`, generated on first start
+/// and stored with the data, then reused forever. PouchDB builds its
+/// replication id from it, so a uuid that changed on every start (as it
+/// did before v0.1.7) gave every client a new replication id after each
+/// restart: no checkpoint found, full re-sync from `since=0`.
+pub fn server_uuid(root: &sled::Db) -> StorageResult<String> {
+    const KEY: &[u8] = b"nyxdb::server_uuid";
+    if let Some(stored) = root.get(KEY)? {
+        return String::from_utf8(stored.to_vec()).map_err(|e| StorageError::Corrupt(format!("server uuid: {e}")));
+    }
+    let fresh = uuid::Uuid::new_v4().to_string();
+    // compare_and_swap so two starts racing on a fresh data dir agree.
+    match root.compare_and_swap(KEY, None as Option<&[u8]>, Some(fresh.as_bytes()))? {
+        Ok(()) => {
+            root.flush()?;
+            Ok(fresh)
+        }
+        Err(cas) => {
+            let current = cas.current.ok_or_else(|| StorageError::Corrupt("server uuid vanished".into()))?;
+            String::from_utf8(current.to_vec()).map_err(|e| StorageError::Corrupt(format!("server uuid: {e}")))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +467,22 @@ mod tests {
 
         edit(&db, "a", 10, &serde_json::json!({}));
         assert_eq!(db.seq_log.len(), 3, "a later write must replace a's entry, not add one");
+    }
+
+    #[test]
+    fn server_uuid_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("nyxdb-uuid-test-{}", uuid::Uuid::new_v4()));
+        let first = {
+            let root = sled::open(&dir).unwrap();
+            let uuid = server_uuid(&root).unwrap();
+            assert_eq!(server_uuid(&root).unwrap(), uuid, "stable within one run");
+            uuid
+        };
+        let second = {
+            let root = sled::open(&dir).unwrap();
+            server_uuid(&root).unwrap()
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(first, second, "the uuid must be the same after reopening the data dir");
     }
 }

@@ -61,6 +61,7 @@ async fn main() {
     }
     let root = Arc::new(config.open().expect("failed to open sled database"));
     let flush_root = root.clone();
+    let server_uuid = nyxdb::storage::server_uuid(&root).expect("failed to read or create the server uuid");
 
     let creds = Credentials::load_or_generate(Path::new(&data_dir)).expect("failed to load/generate credentials");
     tracing::info!(
@@ -84,7 +85,7 @@ async fn main() {
         root,
         feeds: ChangeFeedRegistry::default(),
         creds: Arc::new(creds),
-        server_uuid: Arc::from(uuid::Uuid::new_v4().to_string()),
+        server_uuid: Arc::from(server_uuid),
         locks: nyxdb::storage::WriteLocks::default(),
     })
         .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes));
