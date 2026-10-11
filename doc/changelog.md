@@ -204,6 +204,28 @@ attachment-heavy replication, or a higher server limit). Test:
 `test/integration/large_batches.js` (250-doc batch, the PouchDB push,
 just-under and just-over a small limit on a self-spawned server).
 
+**LOW: write semantics.**
+
+- `DELETE /{db}/{id}` didn't exist (405). That includes the request
+  PouchDB's `remote.remove(id, losingRev)` sends to resolve a conflict
+  on a remote — reproduced with a real PouchDB client. Now a tombstone
+  on top of `rev` (must be a current leaf, else 409), checked inside the
+  write lock via a new `Db::try_update_tree`.
+- `_deleted:true` on `PUT`/`_bulk_docs` was stored as an ordinary field
+  on a live revision; it now deletes. A write naming a current losing
+  leaf's `_rev` now extends that leaf instead of the winner (still no
+  optimistic concurrency: a stale `_rev` falls back to the winner).
+- `PUT` stored the client's stale `_rev` inside the new revision's body.
+  `_id`/`_rev`/`_deleted` are now stripped (unit test — it isn't visible
+  over HTTP).
+- The rev hash now covers the parent and deleted flag, like CouchDB's;
+  otherwise two empty-body tombstones on different branches at the same
+  generation got the same rev id.
+- `_local` docs reported rev `0-1` forever and couldn't be deleted. They
+  now get `0-N` (incremented atomically) and have `DELETE`.
+
+Test: `test/write_semantics/run.js` (all 9 checks fail before the fix).
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a

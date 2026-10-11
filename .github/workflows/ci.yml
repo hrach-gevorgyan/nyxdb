@@ -75,6 +75,9 @@ jobs:
       - name: Slow storage work does not stall other requests
         run: node test/blocking/run.js
 
+      - name: Write semantics (_deleted, DELETE, _local revs)
+        run: node test/write_semantics/run.js
+
       - name: Databases are only created by PUT /{db}
         run: node test/databases/run.js
 

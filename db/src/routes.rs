@@ -82,12 +82,12 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(server_info))
         .route("/:db", put(create_db).get(db_info).delete(delete_db))
-        .route("/:db/:id", get(get_doc).put(put_doc))
+        .route("/:db/:id", get(get_doc).put(put_doc).delete(delete_doc))
         .route("/:db/:id/:attname", get(get_attachment).put(put_attachment).delete(delete_attachment))
         .route("/:db/_bulk_docs", post(bulk_docs))
         .route("/:db/_revs_diff", post(revs_diff))
         .route("/:db/_bulk_get", post(bulk_get))
-        .route("/:db/_local/:id", get(get_local).put(put_local))
+        .route("/:db/_local/:id", get(get_local).put(put_local).delete(delete_local))
         .route("/:db/_changes", get(changes))
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth::require_auth))
         // Outermost: catches everything the handlers above don't produce
@@ -542,10 +542,27 @@ async fn get_local(
         let bytes = bytes.ok_or_else(not_found)?;
         let mut body: Value = serde_json::from_slice(&bytes).map_err(|_| internal_error())?;
         body["_id"] = json!(format!("_local/{id}"));
+        if body.get("_rev").is_none() {
+            body["_rev"] = json!("0-1"); // stored before revisions were counted
+        }
         Ok(Json(body))
     })
 }
 
+/// The `N` of a stored `_local` doc's `0-N` revision (0 if there's none).
+fn local_rev_number(stored: Option<&[u8]>) -> u64 {
+    stored
+        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+        .and_then(|doc| doc.get("_rev")?.as_str()?.strip_prefix("0-")?.parse().ok())
+        .unwrap_or(0)
+}
+
+/// `_local` docs (replication checkpoints) are single-revision, never
+/// replicated and never in `_changes`. Like CouchDB, each write gets the
+/// next `0-N` revision — it used to be `0-1` forever — and the client's
+/// own `_id`/`_rev` aren't stored as fields. The increment is one atomic
+/// sled update, so concurrent checkpoint writes can't hand out the same
+/// number. No optimistic concurrency, same as documents.
 async fn put_local(
     State(state): State<AppState>,
     Path((db_name, id)): Path<(String, String)>,
@@ -554,11 +571,32 @@ async fn put_local(
     let db = state.db(&db_name)?;
     if let Some(obj) = body.as_object_mut() {
         obj.remove("_id");
+        obj.remove("_rev");
     }
-    let bytes = serde_json::to_vec(&body).map_err(|_| internal_error())?;
-    blocking(|| db.local.insert(&id, bytes)).map_err(|_| internal_error())?;
+    let stored = blocking(|| {
+        db.local.update_and_fetch(&id, |old| {
+            let mut next = body.clone();
+            next["_rev"] = json!(format!("0-{}", local_rev_number(old) + 1));
+            serde_json::to_vec(&next).ok()
+        })
+    })
+    .map_err(|_| internal_error())?;
     db.flush().await.map_err(|_| internal_error())?;
-    Ok(Json(json!({"ok": true, "id": format!("_local/{id}"), "rev": "0-1"})))
+    let rev = format!("0-{}", local_rev_number(stored.as_deref()));
+    Ok(Json(json!({"ok": true, "id": format!("_local/{id}"), "rev": rev})))
+}
+
+async fn delete_local(
+    State(state): State<AppState>,
+    Path((db_name, id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let db = state.db(&db_name)?;
+    let removed = blocking(|| db.local.remove(&id)).map_err(|_| internal_error())?;
+    if removed.is_none() {
+        return Err(not_found());
+    }
+    db.flush().await.map_err(|_| internal_error())?;
+    Ok(Json(json!({"ok": true, "id": format!("_local/{id}"), "rev": "0-0"})))
 }
 
 /// `POST /{db}/_bulk_docs` — dispatches to whichever write semantics the
@@ -603,9 +641,9 @@ fn bulk_docs_new_edits_true(db: &Db, feed: &ChangeFeed, docs: &[Value]) -> Resul
             .and_then(Value::as_str)
             .map(String::from)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // `_rev`/`_deleted` stay in: write_doc reads and strips them.
         if let Some(obj) = doc.as_object_mut() {
             obj.remove("_id");
-            obj.remove("_rev");
         }
 
         let previous = current_body(db, &id);
@@ -834,26 +872,103 @@ fn bulk_get_blocking(state: &AppState, db_name: &str, params: &BulkGetParams, pa
 /// top of whatever the winner is *at write time* — read inside the
 /// write lock, so two concurrent writers build a line instead of both
 /// branching off the same parent and one overwriting the other.
-fn write_doc(db: &Db, feed: &ChangeFeed, id: &str, body: Value) -> StorageResult<String> {
-    let hash = format!("{:x}", md5_like(&body));
+/// `_id`, `_rev` and `_deleted` are request metadata, not content: they're
+/// taken out of the body before it's stored (a stale `_rev` used to be
+/// stored as a field of the new revision, and `_deleted:true` was stored
+/// as an ordinary field on a *live* revision instead of deleting).
+fn take_write_meta(body: &mut Value) -> (Option<String>, bool) {
+    let Some(obj) = body.as_object_mut() else { return (None, false) };
+    obj.remove("_id");
+    let rev = obj.remove("_rev").and_then(|r| r.as_str().map(String::from));
+    let deleted = obj.remove("_deleted").and_then(|d| d.as_bool()).unwrap_or(false);
+    (rev, deleted)
+}
+
+/// The app-write path (`new_edits` absent/true): mints the next rev. Its
+/// parent is the body's `_rev` when that's a current leaf — so an edit or
+/// delete of a losing branch lands on that branch, which is how clients
+/// resolve conflicts — and otherwise the winner *at write time* (read
+/// inside the write lock, so concurrent writers build a line). There's
+/// still no optimistic concurrency: a stale `_rev` doesn't fail the write
+/// (see doc/USAGE.md §7). `_deleted:true` writes a tombstone.
+fn write_doc(db: &Db, feed: &ChangeFeed, id: &str, mut body: Value) -> StorageResult<String> {
+    let (requested_parent, deleted) = take_write_meta(&mut body);
     db.update_tree(id, feed, |tree| {
-        let parent = tree.winner().cloned();
+        let parent = match requested_parent {
+            Some(rev) if tree.is_leaf(&rev) => Some(rev),
+            _ => tree.winner().cloned(),
+        };
         let gen = parent
             .as_ref()
             .and_then(|r| r.split_once('-'))
             .and_then(|(g, _)| g.parse::<u64>().ok())
             .unwrap_or(0)
             + 1;
-        let rev = format!("{gen}-{hash}");
-        tree.nodes.insert(rev.clone(), RevNode { parent, deleted: false, body });
+        let rev = format!("{gen}-{:x}", rev_hash(parent.as_deref(), deleted, &body));
+        tree.nodes.insert(rev.clone(), RevNode { parent, deleted, body });
         rev
     })
     .map(|(_, rev)| rev)
 }
 
-fn md5_like(body: &Value) -> u64 {
+#[derive(serde::Deserialize)]
+struct DeleteDocParams {
+    rev: Option<String>,
+}
+
+fn conflict() -> ApiError {
+    ApiError(StatusCode::CONFLICT, "conflict", "Document update conflict.")
+}
+
+/// `DELETE /{db}/{id}?rev=<rev>` — writes a tombstone on top of `rev`,
+/// which must be a current leaf (409 otherwise). On a conflicted doc,
+/// deleting a losing leaf removes that branch: this is the request
+/// PouchDB's `db.remove(id, losingRev)` sends to resolve a conflict on a
+/// remote, and it used to get 405 (the route didn't exist). Without
+/// `rev`, the live winner is deleted. The leaf check happens inside the
+/// write lock, so a concurrent write can't redirect the delete.
+async fn delete_doc(
+    State(state): State<AppState>,
+    Path((db_name, id)): Path<(String, String)>,
+    Query(params): Query<DeleteDocParams>,
+) -> Result<Json<Value>, ApiError> {
+    let db = state.db(&db_name)?;
+    let feed = state.feeds.get_or_create(&db_name);
+    let written = blocking(|| {
+        db.try_update_tree(&id, &feed, |tree| {
+            if tree.nodes.is_empty() {
+                return Err(not_found());
+            }
+            let parent = match params.rev.as_deref() {
+                Some(rev) if tree.is_leaf(rev) => rev.to_string(),
+                Some(_) => return Err(conflict()),
+                None => match tree.winner() {
+                    Some(winner) if !tree.nodes[winner].deleted => winner.clone(),
+                    _ => return Err(deleted()),
+                },
+            };
+            let gen = parent.split_once('-').and_then(|(g, _)| g.parse::<u64>().ok()).unwrap_or(0) + 1;
+            let body = json!({});
+            let rev = format!("{gen}-{:x}", rev_hash(Some(&parent), true, &body));
+            tree.nodes.insert(rev.clone(), RevNode { parent: Some(parent), deleted: true, body });
+            Ok(rev)
+        })
+    })
+    .map_err(|_| internal_error())?;
+    let (_, rev) = written?;
+    db.flush().await.map_err(|_| internal_error())?;
+    Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
+}
+
+/// Like CouchDB's, the rev hash covers the parent and the deleted flag as
+/// well as the body — otherwise two tombstones with the same (empty) body
+/// at the same generation on different branches would get the same rev
+/// id and collide in the tree.
+fn rev_hash(parent: Option<&str>, deleted: bool, body: &Value) -> u64 {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
+    hasher.update(parent.unwrap_or("").as_bytes());
+    hasher.update([deleted as u8]);
     hasher.update(body.to_string().as_bytes());
     let digest = hasher.finalize();
     u64::from_be_bytes(digest[0..8].try_into().unwrap())
@@ -1095,6 +1210,18 @@ fn changes_continuous(
 mod tests {
     use super::*;
     use crate::storage::WriteLocks;
+
+    /// Request metadata must not be stored as document content: a stale
+    /// `_rev` used to be saved as a field of the new revision (invisible
+    /// over HTTP, since reads overwrite `_rev`, but stored and hashed).
+    #[test]
+    fn write_metadata_is_taken_out_of_the_stored_body() {
+        let mut body = json!({"_id": "x", "_rev": "1-old", "_deleted": true, "keep": 1});
+        let (rev, deleted) = take_write_meta(&mut body);
+        assert_eq!(rev.as_deref(), Some("1-old"));
+        assert!(deleted);
+        assert_eq!(body, json!({"keep": 1}));
+    }
 
     /// A write that lands after longpoll has checked storage (found
     /// nothing) but before it starts listening must still wake it — it

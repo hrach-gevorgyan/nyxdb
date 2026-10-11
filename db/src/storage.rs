@@ -262,13 +262,33 @@ impl Db {
         feed: &ChangeFeed,
         modify: impl FnOnce(&mut RevTree) -> T,
     ) -> StorageResult<(u64, T)> {
+        self.try_update_tree(doc_id, feed, |tree| Ok::<T, std::convert::Infallible>(modify(tree)))
+            .map(|result| match result {
+                Ok(written) => written,
+                Err(never) => match never {},
+            })
+    }
+
+    /// `update_tree` for writes that may decide, after seeing the current
+    /// tree, not to write at all (e.g. `DELETE ?rev=` of a rev that's no
+    /// longer a leaf). The decision is made inside the write lock, so it
+    /// can't go stale before the write; on `Err` nothing is written.
+    pub fn try_update_tree<T, E>(
+        &self,
+        doc_id: &str,
+        feed: &ChangeFeed,
+        modify: impl FnOnce(&mut RevTree) -> Result<T, E>,
+    ) -> StorageResult<Result<(u64, T), E>> {
         let _guard = self.write_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut tree = self.get_tree(doc_id)?.unwrap_or_default();
-        let out = modify(&mut tree);
+        let out = match modify(&mut tree) {
+            Ok(out) => out,
+            Err(e) => return Ok(Err(e)),
+        };
         tree.prune(REVS_LIMIT);
         let seq = self.put_tree(doc_id, &tree)?;
         feed.publish(ChangeEvent { seq, doc_id: doc_id.to_string() });
-        Ok((seq, out))
+        Ok(Ok((seq, out)))
     }
 
     fn put_tree(&self, doc_id: &str, tree: &RevTree) -> StorageResult<u64> {

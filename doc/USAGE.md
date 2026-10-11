@@ -181,9 +181,11 @@ and `revs_info` lists it as `missing`. Each branch keeps its newest
 ### `PUT /{db}/{id}`
 Two modes, same as `_bulk_docs`, selected by `?new_edits=`:
 
-**Default** (`new_edits` absent or `true`) — the app-write path.
-Always creates a new revision on top of the current winner
-(last-write-wins), not the replication path:
+**Default** (`new_edits` absent or `true`) — the app-write path. Creates
+a new revision on top of the body's `_rev` if that's a current leaf (so
+an edit of a losing conflict branch extends that branch), otherwise on
+top of the current winner. `"_deleted": true` writes a tombstone.
+`_id`/`_rev`/`_deleted` are never stored as fields of the doc:
 
 ```bash
 curl -u user:pass -X PUT http://127.0.0.1:5984/mydb/doc1 \
@@ -194,6 +196,18 @@ curl -u user:pass -X PUT http://127.0.0.1:5984/mydb/doc1 \
 No optimistic concurrency control here — a `PUT` always succeeds even
 if you didn't send the current `_rev`. Use `new_edits=false` if you
 need real conflict detection.
+
+### `DELETE /{db}/{id}?rev=<rev>`
+Writes a tombstone on top of `rev`, which must be a current leaf
+(`409 conflict` otherwise). On a conflicted doc, deleting a *losing*
+leaf removes that branch — the request PouchDB's
+`db.remove(id, losingRev)` sends to resolve a conflict on a remote.
+Without `rev`, the live winner is deleted.
+
+```bash
+curl -u user:pass -X DELETE "http://127.0.0.1:5984/mydb/doc1?rev=2-aaaa"
+# {"ok":true,"id":"doc1","rev":"3-<hash>"}
+```
 
 **`?new_edits=false`** — the single-document form of the replication
 push format. You supply the exact `_rev` (and optionally
@@ -347,17 +361,18 @@ plain `GET /{db}/{id}` with no `rev`: that one *does* 404 with
 "does this document currently exist" is a genuinely different
 question from "give me this specific revision's content.")
 
-### `GET/PUT /{db}/_local/{id}`
+### `GET/PUT/DELETE /{db}/_local/{id}`
 Replication checkpoints. Last-write-wins, never shows up in `_changes`.
 This is how `live:true` resumes after a restart instead of re-syncing
-everything.
+everything. Each write gets the next `0-N` revision, like CouchDB.
 
 ```bash
 curl -u user:pass -X PUT http://127.0.0.1:5984/mydb/_local/my-checkpoint \
   -H "Content-Type: application/json" -d '{"last_seq":42}'
+# {"ok":true,"id":"_local/my-checkpoint","rev":"0-1"}
 
 curl -u user:pass http://127.0.0.1:5984/mydb/_local/my-checkpoint
-# {"_id":"_local/my-checkpoint","last_seq":42}
+# {"_id":"_local/my-checkpoint","_rev":"0-1","last_seq":42}
 ```
 
 ### `GET /{db}/_changes`

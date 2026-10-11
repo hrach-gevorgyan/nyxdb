@@ -12,6 +12,9 @@
 - `blocking/` — `GET /` stays fast while many full `_changes` scans run.
 - `databases/` — only `PUT /{db}` creates a database, with a valid
   name; every other route on a missing db is a 404.
+- `write_semantics/` — `_deleted`, `DELETE` (incl. PouchDB resolving a
+  conflict on a remote), writes onto a losing leaf, `_local` revisions.
+  Uses `test/integration`'s PouchDB install.
 - `durability/` — spawns its own server, hard-kills it right after
   acknowledged writes, restarts it; every acknowledged write must
   survive. Needs the release binary (or `NYXDB_BIN`).
@@ -57,6 +60,9 @@ node test/blocking/run.js
 
 # Database creation and naming
 node test/databases/run.js
+
+# Write semantics
+node test/write_semantics/run.js
 
 # Hard-kill durability (spawns its own server on port 8299)
 node test/durability/run.js
