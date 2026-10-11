@@ -3,6 +3,8 @@
 - `integration/` — drives a real PouchDB client against a running
   server instance: one-shot replication, `live:true` two-device sync, and
   editing an already-replicated doc without creating phantom conflicts.
+- `concurrency/` — many simultaneous writes to the same doc; every
+  acknowledged revision must survive.
 - `revisions/` — revision history on the read paths: `_bulk_get` with
   `revs`/`latest`, `GET` with `revs`/`revs_info`/`open_revs`.
 - `differential/` — runs the same operations against this server and a
@@ -29,6 +31,9 @@ cargo test --manifest-path db/Cargo.toml
 node test/integration/run.js
 node test/integration/live_sync.js
 node test/integration/edit_replication.js
+
+# Concurrent writers to one doc
+node test/concurrency/run.js
 
 # Revision history on read paths
 node test/revisions/run.js

@@ -84,6 +84,7 @@ async fn main() {
         feeds: ChangeFeedRegistry::default(),
         creds: Arc::new(creds),
         server_uuid: Arc::from(uuid::Uuid::new_v4().to_string()),
+        locks: nyxdb::storage::WriteLocks::default(),
     })
         .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes));
     // CORS must wrap auth (outermost), not the other way round: tower_http's

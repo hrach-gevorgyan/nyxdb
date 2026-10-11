@@ -4,7 +4,7 @@
 
 use crate::changes::{ChangeEvent, ChangeFeed, ChangeFeedRegistry};
 use crate::revtree::{RevNode, RevTree};
-use crate::storage::{Db, StorageResult};
+use crate::storage::{Db, StorageResult, WriteLocks};
 use axum::{
     body::{to_bytes, Body, Bytes},
     extract::{Path, Query, Request, State},
@@ -28,6 +28,14 @@ pub struct AppState {
     /// CouchDB returns the same uuid on every `GET /` for a given server,
     /// not a fresh one per request.
     pub server_uuid: Arc<str>,
+    /// Per-database write locks — see `Db::update_tree`.
+    pub locks: WriteLocks,
+}
+
+impl AppState {
+    fn db(&self, name: &str) -> Result<Db, ApiError> {
+        Db::open(&self.root, name, &self.locks).map_err(|_| internal_error())
+    }
 }
 
 /// CouchDB clients (PouchDB included) expect a JSON body on error
@@ -128,7 +136,7 @@ async fn create_db(
     if existed {
         return Err(ApiError(StatusCode::PRECONDITION_FAILED, "file_exists", "file_exists"));
     }
-    Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    state.db(&db_name)?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -136,7 +144,7 @@ async fn db_info(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let db = state.db(&db_name)?;
     let doc_count = db.docs.len();
     Ok(Json(json!({"db_name": db_name, "doc_count": doc_count})))
 }
@@ -204,7 +212,7 @@ async fn get_doc(
     Path((db_name, id)): Path<(String, String)>,
     Query(params): Query<GetDocParams>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let db = state.db(&db_name)?;
     let tree = db.get_tree(&id).map_err(|_| internal_error())?;
     let tree = tree.ok_or_else(not_found)?;
     if let Some(open_revs) = params.open_revs.as_deref() {
@@ -311,7 +319,7 @@ async fn put_doc(
     Query(params): Query<PutDocParams>,
     Json(mut body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let db = state.db(&db_name)?;
     let feed = state.feeds.get_or_create(&db_name);
 
     if params.new_edits == Some(false) {
@@ -338,7 +346,7 @@ async fn get_attachment(
     State(state): State<AppState>,
     Path((db_name, id, attname)): Path<(String, String, String)>,
 ) -> Result<Response, ApiError> {
-    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let db = state.db(&db_name)?;
     let tree = db.get_tree(&id).map_err(|_| internal_error())?.ok_or_else(not_found)?;
     let winner = tree.winner().ok_or_else(not_found)?;
     let node = &tree.nodes[winner];
@@ -372,7 +380,7 @@ async fn put_attachment(
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let db = state.db(&db_name)?;
     let mut doc_body = match db.get_tree(&id).map_err(|_| internal_error())? {
         Some(tree) => match tree.winner() {
             Some(winner) if !tree.nodes[winner].deleted => tree.nodes[winner].body.clone(),
@@ -400,7 +408,7 @@ async fn delete_attachment(
     State(state): State<AppState>,
     Path((db_name, id, attname)): Path<(String, String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let db = state.db(&db_name)?;
     let tree = db.get_tree(&id).map_err(|_| internal_error())?.ok_or_else(not_found)?;
     let winner = tree.winner().ok_or_else(not_found)?;
     if tree.nodes[winner].deleted {
@@ -422,7 +430,7 @@ async fn get_local(
     State(state): State<AppState>,
     Path((db_name, id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let db = state.db(&db_name)?;
     let bytes = db.local.get(&id).map_err(|_| internal_error())?;
     let bytes = bytes.ok_or_else(not_found)?;
     let mut body: Value = serde_json::from_slice(&bytes).map_err(|_| internal_error())?;
@@ -435,7 +443,7 @@ async fn put_local(
     Path((db_name, id)): Path<(String, String)>,
     Json(mut body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let db = state.db(&db_name)?;
     if let Some(obj) = body.as_object_mut() {
         obj.remove("_id");
     }
@@ -457,7 +465,7 @@ async fn bulk_docs(
     Path(db_name): Path<String>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let db = state.db(&db_name)?;
     let feed = state.feeds.get_or_create(&db_name);
     let docs = payload
         .get("docs")
@@ -547,18 +555,9 @@ fn write_doc_new_edits_false(
     }
     crate::attachments::extract_inline_attachments(db, &mut body).map_err(|_| "invalid attachment data")?;
 
-    let write = || -> StorageResult<u64> {
-        let mut tree = db.get_tree(id)?.unwrap_or_default();
-        tree.insert_revision_chain(&chain, deleted, body);
-        db.put_tree(id, &tree)
-    };
-    match write() {
-        Ok(seq) => {
-            feed.publish(ChangeEvent { seq, doc_id: id.to_string() });
-            Ok(rev)
-        }
-        Err(_) => Err("failed to write document"),
-    }
+    db.update_tree(id, feed, |tree| tree.insert_revision_chain(&chain, deleted, body))
+        .map(|_| rev)
+        .map_err(|_| "failed to write document")
 }
 
 /// Resolves a doc's revision id + ancestry (as `new_edits:false` sends
@@ -596,7 +595,7 @@ async fn revs_diff(
     Path(db_name): Path<String>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let db = state.db(&db_name)?;
     let requested = payload.as_object().ok_or(ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
 
     let mut result = serde_json::Map::new();
@@ -634,7 +633,7 @@ async fn bulk_get(
     Query(params): Query<BulkGetParams>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let db = state.db(&db_name)?;
     let requests = payload
         .get("docs")
         .and_then(Value::as_array)
@@ -694,21 +693,25 @@ async fn bulk_get(
     Ok(Json(json!({"results": results})))
 }
 
+/// The app-write path (`new_edits` absent/true): mints the next rev on
+/// top of whatever the winner is *at write time* — read inside the
+/// write lock, so two concurrent writers build a line instead of both
+/// branching off the same parent and one overwriting the other.
 fn write_doc(db: &Db, feed: &ChangeFeed, id: &str, body: Value) -> StorageResult<String> {
-    let mut tree = db.get_tree(id)?.unwrap_or_default();
-    let parent = tree.winner().cloned();
-    let gen = parent
-        .as_ref()
-        .and_then(|r| r.split_once('-'))
-        .and_then(|(g, _)| g.parse::<u64>().ok())
-        .unwrap_or(0)
-        + 1;
     let hash = format!("{:x}", md5_like(&body));
-    let rev = format!("{gen}-{hash}");
-    tree.nodes.insert(rev.clone(), RevNode { parent, deleted: false, body });
-    let seq = db.put_tree(id, &tree)?;
-    feed.publish(ChangeEvent { seq, doc_id: id.to_string() });
-    Ok(rev)
+    db.update_tree(id, feed, |tree| {
+        let parent = tree.winner().cloned();
+        let gen = parent
+            .as_ref()
+            .and_then(|r| r.split_once('-'))
+            .and_then(|(g, _)| g.parse::<u64>().ok())
+            .unwrap_or(0)
+            + 1;
+        let rev = format!("{gen}-{hash}");
+        tree.nodes.insert(rev.clone(), RevNode { parent, deleted: false, body });
+        rev
+    })
+    .map(|(_, rev)| rev)
 }
 
 fn md5_like(body: &Value) -> u64 {
@@ -739,7 +742,7 @@ async fn changes(
     Path(db_name): Path<String>,
     Query(params): Query<ChangesParams>,
 ) -> Result<Response, ApiError> {
-    let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
+    let db = state.db(&db_name)?;
     let since: u64 = params.since.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
     let style_all_docs = params.style.as_deref() == Some("all_docs");
 

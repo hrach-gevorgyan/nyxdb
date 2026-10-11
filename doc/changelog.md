@@ -5,6 +5,24 @@
 > `COUCHDB_CLONE_*` env var prefix (now `NYXDB_*`) — left as an honest
 > historical record rather than rewritten.
 
+## v0.1.7 (unreleased)
+
+Fixes from a read-only review of v0.1.6, in its priority order. Each
+fix was written test-first: the new test failed before the fix and
+failed again with the fix deliberately broken.
+
+**1. Concurrent writes to the same doc lost a branch (critical).**
+Every write did read tree → modify → write tree with no lock, on a
+multi-threaded runtime. Two simultaneous writes to one doc both read
+the same tree and the second overwrote the first; both clients got a
+success response and the lost branch was never re-sent. Reproduced
+with 24 parallel writers to one doc: ~21 of 24 acknowledged revisions
+lost, on all three write paths (`PUT ?new_edits=false`, `_bulk_docs
+new_edits:false`, plain `PUT`). Fixed with a per-database write lock:
+`Db::update_tree` is now the only way a document gets written, and
+holds the lock across read → modify → write → seq assignment →
+publish. Test: `test/concurrency/run.js`.
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a

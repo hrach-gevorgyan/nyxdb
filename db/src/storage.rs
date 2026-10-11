@@ -2,11 +2,13 @@
 //! revision tree, plus an append-only `(seq, doc_id)` log for `_changes`.
 //! See plan §4.3, §5.
 
+use crate::changes::{ChangeEvent, ChangeFeed};
 use crate::revtree::{RevId, RevNode, RevTree};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Reads can fail two genuinely different ways: sled itself erroring
 /// (disk I/O, etc. — already a `Result` from sled), or the bytes we get
@@ -109,8 +111,22 @@ impl TryFrom<StoredTree> for RevTree {
     }
 }
 
+/// One write lock per database, shared across requests (a `Db` is opened
+/// fresh per request, so the lock has to live somewhere longer-lived —
+/// `AppState`). See `Db::update_tree` for why it exists.
+#[derive(Clone, Default)]
+pub struct WriteLocks(Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>);
+
+impl WriteLocks {
+    fn for_db(&self, name: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.entry(name.to_string()).or_default().clone()
+    }
+}
+
 #[derive(Clone)]
 pub struct Db {
+    write_lock: Arc<Mutex<()>>,
     /// The shared root, kept around for `generate_id()` — a lock-free,
     /// mostly-in-memory monotonic counter (batches of ids are persisted
     /// together, not one disk write per id) that replaced a hand-rolled
@@ -133,8 +149,9 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn open(base: &sled::Db, name: &str) -> sled::Result<Self> {
+    pub fn open(base: &sled::Db, name: &str, locks: &WriteLocks) -> sled::Result<Self> {
         Ok(Self {
+            write_lock: locks.for_db(name),
             base: base.clone(),
             docs: base.open_tree(format!("{name}::docs"))?,
             local: base.open_tree(format!("{name}::local"))?,
@@ -168,7 +185,32 @@ impl Db {
         Ok(Some(tree))
     }
 
-    pub fn put_tree(&self, doc_id: &str, tree: &RevTree) -> StorageResult<u64> {
+    /// The only way a document gets written. Holds this database's write
+    /// lock across read tree → `modify` → write tree → seq assignment →
+    /// publish, so concurrent writers to the same doc serialise instead of
+    /// each reading the same tree and the last one silently overwriting
+    /// the other's branch (both used to get a success response; the lost
+    /// branch was never re-sent — see `doc/changelog.md`, v0.1.7).
+    ///
+    /// Seq assignment and publishing happen inside the same lock, so
+    /// within a database seqs become visible, and are broadcast, strictly
+    /// in order — `_changes` followers that drop `seq <= last_seq` can't
+    /// skip an earlier write that landed late.
+    pub fn update_tree<T>(
+        &self,
+        doc_id: &str,
+        feed: &ChangeFeed,
+        modify: impl FnOnce(&mut RevTree) -> T,
+    ) -> StorageResult<(u64, T)> {
+        let _guard = self.write_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut tree = self.get_tree(doc_id)?.unwrap_or_default();
+        let out = modify(&mut tree);
+        let seq = self.put_tree(doc_id, &tree)?;
+        feed.publish(ChangeEvent { seq, doc_id: doc_id.to_string() });
+        Ok((seq, out))
+    }
+
+    fn put_tree(&self, doc_id: &str, tree: &RevTree) -> StorageResult<u64> {
         let stored = StoredTree::try_from(tree)
             .map_err(|e| StorageError::Corrupt(format!("failed to encode doc body for {doc_id:?}: {e}")))?;
         let bytes = bincode_options()
@@ -236,7 +278,6 @@ pub type SharedRoot = Arc<sled::Db>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::revtree::RevTree;
 
     /// Real bug found live-testing against a real PouchDB app: sled's
     /// `generate_id()` starts at 0, but `_changes?since=0` (what every
@@ -253,11 +294,12 @@ mod tests {
         // crate like `tempfile` just for one test (see doc/MAINTENANCE.md
         // on keeping the dependency list small).
         let base = sled::Config::new().temporary(true).open().unwrap();
-        let db = Db::open(&base, "testdb").unwrap();
+        let db = Db::open(&base, "testdb", &WriteLocks::default()).unwrap();
 
-        let mut tree = RevTree::default();
-        tree.insert_revision_chain(&["1-aaa".to_string()], false, serde_json::json!({"x": 1}));
-        db.put_tree("only-doc", &tree).unwrap();
+        db.update_tree("only-doc", &ChangeFeed::default(), |tree| {
+            tree.insert_revision_chain(&["1-aaa".to_string()], false, serde_json::json!({"x": 1}))
+        })
+        .unwrap();
 
         let changes = db.changes_since(0).unwrap();
         assert_eq!(changes.len(), 1, "the first-ever write must be visible to since=0, got: {changes:?}");
