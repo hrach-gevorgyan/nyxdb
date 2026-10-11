@@ -63,6 +63,59 @@ impl RevTree {
         requested.iter().filter(|rev| !self.nodes.contains_key(*rev)).collect()
     }
 
+    /// The revision history of `rev`: `rev` itself, then its parent, and
+    /// so on back to the root, newest first — what `_revisions` and
+    /// `_revs_info` are built from. Empty if `rev` isn't in the tree. A
+    /// parent that's named but was never stored (a chain pushed without
+    /// full ancestry) is still included — its id is known — and the walk
+    /// stops there. Capped at CouchDB's default `revs_limit` (1000).
+    pub fn ancestry(&self, rev: &str) -> Vec<RevId> {
+        const REVS_LIMIT: usize = 1000;
+        let mut out = Vec::new();
+        let mut current = Some(rev.to_string());
+        while let Some(id) = current {
+            if out.len() == REVS_LIMIT {
+                break;
+            }
+            let node = self.nodes.get(&id);
+            if node.is_none() && out.is_empty() {
+                return out;
+            }
+            current = node.and_then(|n| n.parent.clone());
+            out.push(id);
+        }
+        out
+    }
+
+    /// `_revisions` for `rev`: the generation it starts at, plus the
+    /// hash part of every rev in its ancestry, newest first —
+    /// `{"start": 3, "ids": ["c", "b", "a"]}` for `3-c`. This is what a
+    /// pulling replica needs to attach an incoming revision to the
+    /// history it already has instead of storing it as a new root.
+    pub fn revisions(&self, rev: &str) -> Option<(u64, Vec<String>)> {
+        let ancestry = self.ancestry(rev);
+        let first = ancestry.first()?;
+        let start = split_rev(first).0;
+        Some((start, ancestry.iter().map(|r| split_rev(r).1.to_string()).collect()))
+    }
+
+    /// `latest=true` support: every leaf whose history includes `rev`
+    /// (just `rev` itself if it's already a leaf), highest generation
+    /// first. Empty if `rev` isn't in the tree.
+    pub fn leaves_descending_from(&self, rev: &str) -> Vec<RevId> {
+        if !self.nodes.contains_key(rev) {
+            return Vec::new();
+        }
+        let mut out: Vec<RevId> =
+            self.leaves().into_iter().filter(|leaf| self.ancestry(leaf).iter().any(|r| r == rev)).cloned().collect();
+        out.sort_by(|a, b| {
+            let (gen_a, hash_a) = split_rev(a);
+            let (gen_b, hash_b) = split_rev(b);
+            gen_b.cmp(&gen_a).then_with(|| hash_b.cmp(hash_a))
+        });
+        out
+    }
+
     /// `_bulk_docs` with `new_edits:false` (real replication push, plan
     /// §3): the client dictates the exact revision id and its ancestry
     /// via `_revisions` (`{"start": N, "ids": [hash_N, hash_N-1, ...]}`,
@@ -100,6 +153,52 @@ mod tests {
 
     fn node(parent: Option<&str>) -> RevNode {
         RevNode { parent: parent.map(String::from), deleted: false, body: serde_json::json!({}) }
+    }
+
+    /// 1-a ── 2-b ── 3-c, plus a sibling branch 1-a ── 2-x.
+    fn branched_tree() -> RevTree {
+        let mut tree = RevTree::default();
+        tree.nodes.insert("1-a".into(), node(None));
+        tree.nodes.insert("2-b".into(), node(Some("1-a")));
+        tree.nodes.insert("3-c".into(), node(Some("2-b")));
+        tree.nodes.insert("2-x".into(), node(Some("1-a")));
+        tree
+    }
+
+    #[test]
+    fn ancestry_walks_back_from_the_requested_rev_newest_first() {
+        let tree = branched_tree();
+        assert_eq!(tree.ancestry("3-c"), vec!["3-c", "2-b", "1-a"]);
+        assert_eq!(tree.ancestry("2-x"), vec!["2-x", "1-a"]);
+        assert_eq!(tree.ancestry("1-a"), vec!["1-a"]);
+        assert!(tree.ancestry("9-nope").is_empty());
+    }
+
+    /// A chain pushed without its full ancestry still names its parent
+    /// even when that parent's node was never stored — the walk keeps
+    /// the id it knows and stops there, rather than inventing history.
+    #[test]
+    fn ancestry_stops_at_a_known_but_unstored_parent() {
+        let mut tree = RevTree::default();
+        tree.nodes.insert("5-e".into(), node(Some("4-d")));
+        assert_eq!(tree.ancestry("5-e"), vec!["5-e", "4-d"]);
+    }
+
+    #[test]
+    fn revisions_are_start_plus_hash_parts_newest_first() {
+        let tree = branched_tree();
+        assert_eq!(tree.revisions("3-c"), Some((3, vec!["c".to_string(), "b".to_string(), "a".to_string()])));
+        assert_eq!(tree.revisions("2-x"), Some((2, vec!["x".to_string(), "a".to_string()])));
+        assert_eq!(tree.revisions("9-nope"), None);
+    }
+
+    #[test]
+    fn leaves_descending_from_an_ancestor_include_every_branch() {
+        let tree = branched_tree();
+        assert_eq!(tree.leaves_descending_from("1-a"), vec!["3-c", "2-x"]);
+        assert_eq!(tree.leaves_descending_from("2-b"), vec!["3-c"]);
+        assert_eq!(tree.leaves_descending_from("3-c"), vec!["3-c"]);
+        assert!(tree.leaves_descending_from("9-nope").is_empty());
     }
 
     #[test]

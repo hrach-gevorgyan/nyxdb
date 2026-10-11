@@ -5,6 +5,57 @@
 > `COUCHDB_CLONE_*` env var prefix (now `NYXDB_*`) — left as an honest
 > historical record rather than rewritten.
 
+## v0.1.6
+
+**Real replication bug: every edit of an already-synced doc became a
+phantom conflict on the other replica.** NyxDB stored revision trees
+correctly (`_revs_diff` knew old revs, `_changes?style=all_docs` showed
+one leaf), but no read path ever returned a document's history:
+
+- `POST /{db}/_bulk_get?revs=true&latest=true` — what PouchDB uses to
+  pull changes — returned `{"ok": doc}` without `_revisions`, whether
+  `revs` came in the query string or the body.
+- `GET /{db}/{id}` ignored `revs=true` and `revs_info=true`.
+- `GET /{db}/{id}?open_revs=...` returned a plain doc instead of
+  CouchDB's array of `{"ok": doc}` / `{"missing": rev}`.
+
+Without `_revisions`, a pulling PouchDB stores the incoming revision
+(`new_edits:false`) as a new root beside the copy it already has. A
+first full sync (every doc at rev 1) has no history to lose, which is
+why the existing tests never caught it — it needs a doc that's already
+on both replicas and then gets edited.
+
+Fixed: `revtree.rs` now exposes the ancestry walk it already had the
+data for (`ancestry`, `revisions`, `leaves_descending_from`), and
+`routes.rs` builds every read path's body through one shared function
+(`revision_body`). `_bulk_get` honours `revs`/`latest` from the query
+string or the body; `GET` honours `revs`, `revs_info`, `open_revs`
+(`all` or a JSON list) and `latest`, in CouchDB's documented JSON
+shapes. The v0.1.4 tombstone behaviour (`ok` with `_deleted:true`,
+never a `deleted` error) and the v0.1.3 `PUT ?new_edits=false`
+handling are unchanged — both still pinned by `test/ported/`.
+
+Tests written first and confirmed failing before the fix, then
+confirmed failing again with the fix removed:
+- `test/integration/edit_replication.js` — two live PouchDB replicas,
+  create on A, two edits on A, read on B with `{conflicts, revs}`.
+  Before: B had `_conflicts` and one-entry `_revisions`. After: no
+  conflicts, full three-rev history.
+- `test/revisions/run.js` — 16 endpoint checks for the shapes above,
+  on a fixed revision tree built with `PUT ?new_edits=false`.
+- 4 new `revtree.rs` unit tests for the ancestry walk (24 total).
+
+Known gap, documented in `doc/USAGE.md`: ancestors that only ever
+arrived as ids in a pushed `_revisions` chain are stored as empty
+placeholders, so `revs_info` calls them `available` and `open_revs`
+returns them with an empty body; real CouchDB would say `missing`.
+Replication never reads ancestor bodies, so sync isn't affected.
+
+Not re-run for this release: the differential test and
+`doc/BENCHMARKS.md`, both of which need a live real CouchDB instance
+that wasn't available. `BENCHMARKS.md` still reflects v0.1.5; nothing
+in this change touches the write path or storage format.
+
 ## v0.1.5
 
 **Follow-up investigation** of a reported anomaly: `_changes` sequence

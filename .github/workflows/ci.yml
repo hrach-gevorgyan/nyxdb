@@ -62,6 +62,10 @@ jobs:
           npm install --prefix test/integration
           node test/integration/run.js
           node test/integration/live_sync.js
+          node test/integration/edit_replication.js
+
+      - name: Revision history on read paths
+        run: node test/revisions/run.js
 
       - name: Ported PouchDB test cases
         run: node test/ported/pouchdb_tests.js

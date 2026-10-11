@@ -103,8 +103,38 @@ curl -u user:pass "http://127.0.0.1:5984/mydb/doc1?conflicts=true"
 A deleted document returns `404 {"error":"not_found","reason":"deleted"}`
 — different from a document that never existed (`reason:"missing"`).
 
-Not implemented: `?revs=true`, `?open_revs=...`, `?rev=<specific>` (use
-`_bulk_get` instead — it supports fetching a specific `rev`).
+Revision history (since v0.1.6):
+
+- `?revs=true` adds `_revisions: {"start": N, "ids": [...]}` — the hash
+  part of each rev, newest first, walking back from the returned rev.
+- `?revs_info=true` adds `_revs_info: [{"rev": ..., "status": ...}]`
+  along the winner's history; `status` is `available`, `deleted`, or
+  `missing` (an ancestor whose id is known but was never stored).
+- `?open_revs=all` or `?open_revs=["1-a","2-b"]` returns a JSON
+  **array** instead of one doc: `{"ok": doc}` for each revision found
+  (tombstones included, with `_deleted:true`) and `{"missing": rev}`
+  for each requested rev that isn't stored. Add `latest=true` to swap
+  each requested rev for the leaves descending from it. Honours
+  `revs=true` and `attachments=true`. Always JSON — no
+  `multipart/mixed`.
+
+```bash
+curl -u user:pass "http://127.0.0.1:5984/mydb/doc1?revs=true"
+# {"_id":"doc1","_rev":"3-c","_revisions":{"start":3,"ids":["c","b","a"]}, ...}
+
+curl -u user:pass -G "http://127.0.0.1:5984/mydb/doc1" \
+  --data-urlencode 'open_revs=["2-b","9-nope"]'
+# [{"ok":{"_id":"doc1","_rev":"2-b", ...}},{"missing":"9-nope"}]
+```
+
+Not implemented: `?rev=<specific>` (use `?open_revs=["<rev>"]` or
+`_bulk_get`).
+
+Known gap: ancestors that arrived only as part of a pushed `_revisions`
+chain (never as a document body) are stored as empty placeholders, so
+`revs_info` reports them `available` and `open_revs` returns them with
+an empty body. Real CouchDB would call those `missing`. Replication
+doesn't read ancestor bodies, so this doesn't affect sync.
 
 ### `PUT /{db}/{id}`
 Two modes, same as `_bulk_docs`, selected by `?new_edits=`:
@@ -238,6 +268,18 @@ curl -u user:pass -X POST http://127.0.0.1:5984/mydb/_bulk_get \
 # ]}
 ```
 
+Options, in the query string (`?revs=true&latest=true`, what PouchDB
+sends) or as top-level body fields (`{"revs":true,"docs":[...]}`):
+
+- `revs=true` — each returned doc carries `_revisions` (`{start, ids}`,
+  newest first). **Replication depends on this**: without it a pulling
+  PouchDB stores an incoming edit as a new root beside the copy it
+  already has, so every edit to an already-synced doc turns into a
+  phantom conflict on the other replica (fixed in v0.1.6).
+- `latest=true` — a requested `rev` is replaced by the leaf (or
+  leaves) descending from it, so one request entry can return several
+  docs in its `docs` array.
+
 A revision that exists but is a tombstone (a deleted document, or a
 losing conflict branch that was itself a deletion) is still an `ok`
 result, with `_deleted:true` in the body — matching real CouchDB.
@@ -308,8 +350,9 @@ see `roadmap.md`.
 
 | Method | Checks | Where |
 |---|---|---|
-| Unit tests (19) | Winner-picking, conflicts, deletion/recreation, `_revs_diff` | `db/src/revtree.rs` |
-| Real PouchDB client | One-shot and `live:true` two-device sync | `test/integration/` |
+| Unit tests (24) | Winner-picking, conflicts, deletion/recreation, `_revs_diff`, ancestry walk, first-write `_changes` visibility | `db/src/revtree.rs`, `db/src/storage.rs` |
+| Real PouchDB client | One-shot and `live:true` two-device sync; edits to an already-synced doc stay conflict-free | `test/integration/` |
+| Revision history | `_bulk_get` `revs`/`latest`; `GET` `revs`/`revs_info`/`open_revs` | `test/revisions/` |
 | Differential vs. real CouchDB | Winner rev, `_conflicts`, `_changes`, `_revs_diff` diffed against a live CouchDB | `test/differential/` |
 | Load/soak | Large batch writes + many concurrent `feed=continuous` subscribers | `test/load/` |
 | Ported PouchDB test cases | Real edge cases from PouchDB's own test suite | `test/ported/` |

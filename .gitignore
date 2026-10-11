@@ -7,5 +7,6 @@ node_modules/
 # the top, or under test/integration/ if you cd there first.
 inttest_*/
 livetest_*/
+edittest_*/
 data-*/
 credentials.json

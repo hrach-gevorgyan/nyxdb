@@ -100,6 +100,7 @@ see that file for what the gap actually costs at real-world scale
 | `_changes` (normal / longpoll / continuous) | ✅ Supported |
 | `_local` checkpoints | ✅ Supported |
 | `_bulk_docs`, `_bulk_get`, `_revs_diff` | ✅ Supported |
+| Revision history on reads (`revs`, `revs_info`, `open_revs`, `latest`) | ✅ Supported |
 | Attachments (inline base64 + standalone endpoints) | ✅ Supported |
 | HTTP Basic auth | ✅ Supported |
 | `multipart/related` attachment uploads | ❌ Not planned |

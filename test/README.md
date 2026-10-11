@@ -1,7 +1,10 @@
 # Tests
 
 - `integration/` — drives a real PouchDB client against a running
-  server instance: one-shot replication and `live:true` two-device sync.
+  server instance: one-shot replication, `live:true` two-device sync, and
+  editing an already-replicated doc without creating phantom conflicts.
+- `revisions/` — revision history on the read paths: `_bulk_get` with
+  `revs`/`latest`, `GET` with `revs`/`revs_info`/`open_revs`.
 - `differential/` — runs the same operations against this server and a
   real CouchDB, diffs the results. Needs a real CouchDB instance
   (Docker, native install, or hosted — any works).
@@ -25,6 +28,10 @@ cargo test --manifest-path db/Cargo.toml
 # Integration: real PouchDB client against your server
 node test/integration/run.js
 node test/integration/live_sync.js
+node test/integration/edit_replication.js
+
+# Revision history on read paths
+node test/revisions/run.js
 
 # Differential: needs a real CouchDB instance at COUCH_URL
 COUCH_USER=admin COUCH_PASSWORD=yourpass node test/differential/run.js

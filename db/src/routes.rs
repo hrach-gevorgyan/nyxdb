@@ -3,7 +3,7 @@
 //! revision-tree conflict handling wired up yet — last-write-wins.
 
 use crate::changes::{ChangeEvent, ChangeFeed, ChangeFeedRegistry};
-use crate::revtree::RevNode;
+use crate::revtree::{RevNode, RevTree};
 use crate::storage::{Db, StorageResult};
 use axum::{
     body::{to_bytes, Body, Bytes},
@@ -161,12 +161,42 @@ async fn delete_db(
     Ok(Json(json!({"ok": true})))
 }
 
+/// The body of one stored revision, as every read path returns it:
+/// `_id`/`_rev`, `_deleted:true` for a tombstone, and — when asked for
+/// with `revs=true` — `_revisions` (`{start, ids}`, hash parts newest
+/// first). Without `_revisions`, a pulling PouchDB stores an incoming
+/// revision as a new root beside the copy it already has, turning every
+/// edit of an already-replicated doc into a phantom conflict — see
+/// `doc/changelog.md` (v0.1.6).
+fn revision_body(tree: &RevTree, id: &str, rev: &str, node: &RevNode, revs: bool) -> Value {
+    let mut body = node.body.clone();
+    body["_id"] = json!(id);
+    body["_rev"] = json!(rev);
+    if node.deleted {
+        body["_deleted"] = json!(true);
+    }
+    if revs {
+        if let Some((start, ids)) = tree.revisions(rev) {
+            body["_revisions"] = json!({"start": start, "ids": ids});
+        }
+    }
+    body
+}
+
 #[derive(serde::Deserialize)]
 struct GetDocParams {
     #[serde(default)]
     conflicts: bool,
     #[serde(default)]
     attachments: bool,
+    #[serde(default)]
+    revs: bool,
+    #[serde(default)]
+    revs_info: bool,
+    #[serde(default)]
+    latest: bool,
+    /// `all`, or a JSON array of rev ids.
+    open_revs: Option<String>,
 }
 
 async fn get_doc(
@@ -177,14 +207,30 @@ async fn get_doc(
     let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
     let tree = db.get_tree(&id).map_err(|_| internal_error())?;
     let tree = tree.ok_or_else(not_found)?;
+    if let Some(open_revs) = params.open_revs.as_deref() {
+        return open_revs_response(&db, &tree, &id, open_revs, &params).map(Json);
+    }
     let winner = tree.winner().ok_or_else(not_found)?;
     let node = &tree.nodes[winner];
     if node.deleted {
         return Err(deleted());
     }
-    let mut body = node.body.clone();
-    body["_id"] = json!(id);
-    body["_rev"] = json!(winner);
+    let mut body = revision_body(&tree, &id, winner, node, params.revs);
+    if params.revs_info {
+        let info: Vec<Value> = tree
+            .ancestry(winner)
+            .into_iter()
+            .map(|rev| {
+                let status = match tree.nodes.get(&rev) {
+                    Some(n) if n.deleted => "deleted",
+                    Some(_) => "available",
+                    None => "missing",
+                };
+                json!({"rev": rev, "status": status})
+            })
+            .collect();
+        body["_revs_info"] = json!(info);
+    }
     if params.conflicts {
         let conflicts = tree.conflicts();
         if !conflicts.is_empty() {
@@ -195,6 +241,51 @@ async fn get_doc(
         crate::attachments::inflate_attachments(&db, &mut body);
     }
     Ok(Json(body))
+}
+
+/// `GET /{db}/{id}?open_revs=...` — CouchDB's documented JSON shape (what
+/// PouchDB asks for with `Accept: application/json`): an array with one
+/// `{"ok": doc}` per revision found and `{"missing": rev}` per requested
+/// rev that isn't stored. `all` means every leaf, tombstones included.
+/// With `latest=true`, each requested rev is replaced by the leaves
+/// descending from it. Honours `revs=true` and `attachments=true`.
+fn open_revs_response(
+    db: &Db,
+    tree: &RevTree,
+    id: &str,
+    open_revs: &str,
+    params: &GetDocParams,
+) -> Result<Value, ApiError> {
+    let bad_request = || ApiError(StatusCode::BAD_REQUEST, "bad_request", "invalid open_revs");
+    let (requested, all): (Vec<String>, bool) = if open_revs == "all" {
+        let mut leaves: Vec<String> = tree.leaves().into_iter().cloned().collect();
+        leaves.sort();
+        (leaves, true)
+    } else {
+        (serde_json::from_str(open_revs).map_err(|_| bad_request())?, false)
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for rev in requested {
+        let found = if params.latest && !all { tree.leaves_descending_from(&rev) } else { vec![rev.clone()] };
+        let found: Vec<String> = found.into_iter().filter(|r| tree.nodes.contains_key(r)).collect();
+        if found.is_empty() {
+            out.push(json!({"missing": rev}));
+            continue;
+        }
+        for r in found {
+            if !seen.insert(r.clone()) {
+                continue;
+            }
+            let mut body = revision_body(tree, id, &r, &tree.nodes[&r], params.revs);
+            if params.attachments {
+                crate::attachments::inflate_attachments(db, &mut body);
+            }
+            out.push(json!({"ok": body}));
+        }
+    }
+    Ok(Value::Array(out))
 }
 
 #[derive(serde::Deserialize)]
@@ -528,9 +619,19 @@ async fn revs_diff(
 /// (plan §3). If `rev` is omitted, returns the current winner; deleted
 /// docs/missing revs report as `error` entries rather than failing the
 /// whole batch, matching CouchDB's per-item error shape.
+#[derive(serde::Deserialize, Default)]
+struct BulkGetParams {
+    revs: Option<bool>,
+    latest: Option<bool>,
+}
+
+/// `revs`/`latest` can arrive in the query string (CouchDB's documented
+/// form, what PouchDB sends) or as top-level fields of the request body
+/// (also seen from clients) — either one turns the option on.
 async fn bulk_get(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
+    Query(params): Query<BulkGetParams>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let db = Db::open(&state.root, &db_name).map_err(|_| internal_error())?;
@@ -538,6 +639,9 @@ async fn bulk_get(
         .get("docs")
         .and_then(Value::as_array)
         .ok_or(ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
+    let flag = |query: Option<bool>, key: &str| query.unwrap_or(false) || payload.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let revs = flag(params.revs, "revs");
+    let latest = flag(params.latest, "latest");
 
     let mut results = Vec::with_capacity(requests.len());
     for req in requests {
@@ -547,18 +651,22 @@ async fn bulk_get(
         };
         let requested_rev = req.get("rev").and_then(Value::as_str);
 
-        let doc_result = (|| -> StorageResult<Value> {
+        let docs = (|| -> StorageResult<Vec<Value>> {
             let Some(tree) = db.get_tree(id)? else {
-                return Ok(json!({"error": {"id": id, "error": "not_found", "reason": "missing"}}));
+                return Ok(vec![json!({"error": {"id": id, "error": "not_found", "reason": "missing"}})]);
             };
-            let rev_id = match requested_rev {
-                Some(rev) => rev.to_string(),
+            let rev_ids = match requested_rev {
+                Some(rev) if latest => match tree.leaves_descending_from(rev) {
+                    leaves if leaves.is_empty() => vec![rev.to_string()],
+                    leaves => leaves,
+                },
+                Some(rev) => vec![rev.to_string()],
                 None => match tree.winner() {
-                    Some(rev) => rev.clone(),
-                    None => return Ok(json!({"error": {"id": id, "error": "not_found", "reason": "missing"}})),
+                    Some(rev) => vec![rev.clone()],
+                    None => return Ok(vec![json!({"error": {"id": id, "error": "not_found", "reason": "missing"}})]),
                 },
             };
-            match tree.nodes.get(&rev_id) {
+            Ok(rev_ids.iter().map(|rev_id| match tree.nodes.get(rev_id) {
                 // A specific (or resolved-winner) revision that exists in
                 // the tree is a real, fetchable revision even if it's a
                 // tombstone — real CouchDB returns it as an "ok" result
@@ -575,21 +683,13 @@ async fn bulk_get(
                 // currently exist," a different question. Fixed after
                 // this exact mismatch broke real replication — see
                 // `doc/changelog.md`.
-                Some(node) => {
-                    let mut body = node.body.clone();
-                    body["_id"] = json!(id);
-                    body["_rev"] = json!(rev_id);
-                    if node.deleted {
-                        body["_deleted"] = json!(true);
-                    }
-                    Ok(json!({"ok": body}))
-                }
-                None => Ok(json!({"error": {"id": id, "rev": rev_id, "error": "not_found", "reason": "missing"}})),
-            }
+                Some(node) => json!({"ok": revision_body(&tree, id, rev_id, node, revs)}),
+                None => json!({"error": {"id": id, "rev": rev_id, "error": "not_found", "reason": "missing"}}),
+            }).collect())
         })()
         .map_err(|_| internal_error())?;
 
-        results.push(json!({"id": id, "docs": [doc_result]}));
+        results.push(json!({"id": id, "docs": docs}));
     }
     Ok(Json(json!({"results": results})))
 }
