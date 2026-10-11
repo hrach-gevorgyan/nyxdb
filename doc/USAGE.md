@@ -345,9 +345,15 @@ The "what changed" feed. Query params:
   on the gaps between them, same as real CouchDB's own opaque tokens.
 - `style=all_docs` — include every leaf revision, not just the winner.
 - `feed=normal` (default) — one response, everything since `since`.
-- `feed=longpoll` — waits for a change (or `timeout` ms) then responds.
+- `feed=longpoll` — waits for a change (or `timeout` ms, default 60000)
+  then responds. This is what PouchDB's `live:true` sync uses.
 - `feed=continuous` — streams newline-delimited JSON as changes happen.
-  This is what powers `live:true`.
+- `heartbeat=<ms>` (or `true` for 60000) — while waiting, write a
+  newline every `heartbeat` ms so the client and any proxy keep the
+  connection open. On longpoll, as in CouchDB, a heartbeat overrides
+  `timeout`: it waits as long as it takes, and the final body is the
+  usual JSON after the newlines. PouchDB sends `heartbeat=10000` and
+  gives up on a request after heartbeat + 5 s of silence, so this matters.
 
 ```bash
 curl -u user:pass "http://127.0.0.1:5984/mydb/_changes"
@@ -357,8 +363,7 @@ curl -u user:pass -N "http://127.0.0.1:5984/mydb/_changes?feed=continuous&since=
 # one JSON line per change, streamed
 ```
 
-Not implemented: `filter`, `doc_ids`, `heartbeat` (matters if you put
-this behind a reverse proxy that kills idle connections).
+Not implemented: `filter`, `doc_ids`.
 
 ### Not implemented at all
 `_all_dbs`, `_ensure_full_commit`, `_session`, `_security`, Mango
@@ -407,11 +412,10 @@ Reproduce with `test/benchmark/`, `test/load/` (scale via
 3. **`_revs_diff` has no `possible_ancestors`.**
 4. **`_changes` sequence tokens are plain integers**, not portable
    between servers.
-5. **No heartbeat on `feed=continuous`.**
-6. **Attachment stubs don't include `revpos`.** No `multipart/related`
+5. **Attachment stubs don't include `revpos`.** No `multipart/related`
    support — inline JSON only.
-7. **No Mango, views, `_security`, `_session`, clustering, or
+6. **No Mango, views, `_security`, `_session`, clustering, or
    server-triggered replication.**
-8. **Plaintext HTTP only** — fine on a trusted LAN, not for anything
+7. **Plaintext HTTP only** — fine on a trusted LAN, not for anything
    internet-reachable.
-9. **Single-node only** — sled is embedded, no clustering.
+8. **Single-node only** — sled is embedded, no clustering.

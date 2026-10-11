@@ -816,6 +816,17 @@ struct ChangesParams {
     style: Option<String>,
     feed: Option<String>,
     timeout: Option<u64>,
+    /// Milliseconds, or `true` for CouchDB's default of 60 s.
+    heartbeat: Option<String>,
+}
+
+/// `heartbeat` as a duration: a number of ms, or `true` for 60 s (CouchDB's
+/// default). Anything else — absent, `false`, 0, garbage — means none.
+fn heartbeat_of(params: &ChangesParams) -> Option<Duration> {
+    match params.heartbeat.as_deref()? {
+        "true" => Some(Duration::from_secs(60)),
+        ms => ms.parse::<u64>().ok().filter(|ms| *ms > 0).map(Duration::from_millis),
+    }
 }
 
 /// `GET /{db}/_changes` — the core "what changed" feed (plan §3), in all
@@ -834,9 +845,10 @@ async fn changes(
     let since: u64 = params.since.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
     let style_all_docs = params.style.as_deref() == Some("all_docs");
 
+    let heartbeat = heartbeat_of(&params);
     match params.feed.as_deref() {
-        Some("continuous") => changes_continuous(state, db_name, db, since, style_all_docs),
-        Some("longpoll") => changes_longpoll(state, db_name, db, since, style_all_docs, params.timeout).await,
+        Some("continuous") => changes_continuous(state, db_name, db, since, style_all_docs, heartbeat),
+        Some("longpoll") => changes_longpoll(state, db_name, db, since, style_all_docs, params.timeout, heartbeat).await,
         _ => changes_normal(&db, since, style_all_docs),
     }
 }
@@ -871,6 +883,10 @@ fn build_change_row(db: &Db, seq: u64, doc_id: &str, style_all_docs: bool) -> Op
 }
 
 fn changes_normal(db: &Db, since: u64, style_all_docs: bool) -> Result<Response, ApiError> {
+    Ok(Json(changes_body(db, since, style_all_docs)?).into_response())
+}
+
+fn changes_body(db: &Db, since: u64, style_all_docs: bool) -> Result<Value, ApiError> {
     let entries = db.changes_since(since).map_err(|_| internal_error())?;
     // `last_seq` is the highest seq this scan actually covered (or
     // `since` if it found nothing) — never the db's current seq read
@@ -882,7 +898,7 @@ fn changes_normal(db: &Db, since: u64, style_all_docs: bool) -> Result<Response,
         .iter()
         .filter_map(|(seq, id)| build_change_row(db, *seq, id, style_all_docs))
         .collect();
-    Ok(Json(json!({"results": results, "last_seq": last_seq})).into_response())
+    Ok(json!({"results": results, "last_seq": last_seq}))
 }
 
 async fn changes_longpoll(
@@ -892,18 +908,53 @@ async fn changes_longpoll(
     since: u64,
     style_all_docs: bool,
     timeout_ms: Option<u64>,
+    heartbeat: Option<Duration>,
 ) -> Result<Response, ApiError> {
-    let current = db.current_seq().map_err(|_| internal_error())?;
-    if current <= since {
-        let feed = state.feeds.get_or_create(&db_name);
-        let mut rx = feed.subscribe();
-        let timeout = Duration::from_millis(timeout_ms.unwrap_or(60_000));
-        // Whether we got woken by an event or timed out, re-derive from
-        // storage rather than trusting the single event, so a burst of
-        // writes coalesced between subscribe and recv isn't half-missed.
-        let _ = tokio::time::timeout(timeout, rx.recv()).await;
+    let feed = state.feeds.get_or_create(&db_name);
+    let Some(heartbeat) = heartbeat else {
+        wait_for_change(&db, &feed, since, Duration::from_millis(timeout_ms.unwrap_or(60_000)), || {}).await;
+        return changes_normal(&db, since, style_all_docs);
+    };
+    // With a heartbeat, CouchDB waits as long as it takes (the heartbeat
+    // overrides `timeout`) and writes a newline every `heartbeat` so the
+    // client (PouchDB aborts after heartbeat + 5 s of silence) and any
+    // proxy keep the request open. The final body is ordinary JSON; JSON
+    // parsers skip the leading newlines.
+    let stream = futures::stream::unfold(Some((db, feed)), move |state| async move {
+        let (db, feed) = state?;
+        let line = if wait_for_change(&db, &feed, since, heartbeat, || {}).await {
+            match changes_body(&db, since, style_all_docs) {
+                Ok(body) => return Some((Ok::<_, std::io::Error>(Bytes::from(body.to_string())), None)),
+                Err(_) => return None,
+            }
+        } else {
+            Bytes::from_static(b"\n")
+        };
+        Some((Ok(line), Some((db, feed))))
+    });
+    Response::builder()
+        .header("Content-Type", "application/json")
+        .body(Body::from_stream(stream))
+        .map_err(|_| internal_error())
+}
+
+/// Waits until `db` has a change after `since`, or `wait` elapses.
+///
+/// Subscribes *before* checking storage: a write that lands after the
+/// check is then still delivered to the subscription. The other way
+/// round, a write between "check storage (nothing)" and "subscribe" was
+/// missed, and the client sat out the whole timeout (60 s by default)
+/// for a change that had already happened.
+///
+/// `between` runs right after the storage check — a no-op in
+/// production; the test uses it to land a write in exactly that gap.
+async fn wait_for_change(db: &Db, feed: &ChangeFeed, since: u64, wait: Duration, between: impl FnOnce()) -> bool {
+    let mut rx = feed.subscribe();
+    if db.current_seq().map(|seq| seq > since).unwrap_or(true) {
+        return true;
     }
-    changes_normal(&db, since, style_all_docs)
+    between();
+    tokio::time::timeout(wait, rx.recv()).await.is_ok()
 }
 
 /// Streaming state for `feed=continuous`. `queue` holds rows not yet
@@ -915,9 +966,19 @@ struct ContinuousState {
     queue: std::collections::VecDeque<(u64, String)>,
     last_seq: u64,
     style_all_docs: bool,
+    /// Write a newline after this much silence, so the client and any
+    /// proxy keep an idle feed open.
+    heartbeat: Option<Duration>,
 }
 
-fn changes_continuous(state: AppState, db_name: String, db: Db, since: u64, style_all_docs: bool) -> Result<Response, ApiError> {
+fn changes_continuous(
+    state: AppState,
+    db_name: String,
+    db: Db,
+    since: u64,
+    style_all_docs: bool,
+    heartbeat: Option<Duration>,
+) -> Result<Response, ApiError> {
     let feed = state.feeds.get_or_create(&db_name);
     let rx = feed.subscribe();
 
@@ -926,7 +987,7 @@ fn changes_continuous(state: AppState, db_name: String, db: Db, since: u64, styl
     let last_seq = historical.last().map(|(seq, _)| *seq).unwrap_or(since);
 
     let initial =
-        ContinuousState { db, rx, queue: historical.into_iter().collect(), last_seq, style_all_docs };
+        ContinuousState { db, rx, queue: historical.into_iter().collect(), last_seq, style_all_docs, heartbeat };
 
     // A plain broadcast subscription silently drops messages once a slow
     // receiver falls behind the channel's fixed capacity (`RecvError::
@@ -945,7 +1006,14 @@ fn changes_continuous(state: AppState, db_name: String, db: Db, since: u64, styl
                 continue;
             }
 
-            match st.rx.recv().await {
+            let received = match st.heartbeat {
+                Some(heartbeat) => match tokio::time::timeout(heartbeat, st.rx.recv()).await {
+                    Ok(received) => received,
+                    Err(_) => return Some((Ok(Bytes::from_static(b"\n")), st)),
+                },
+                None => st.rx.recv().await,
+            };
+            match received {
                 Ok(event) => {
                     if event.seq <= st.last_seq {
                         continue;
@@ -972,4 +1040,29 @@ fn changes_continuous(state: AppState, db_name: String, db: Db, since: u64, styl
         .header("Content-Type", "application/json")
         .body(Body::from_stream(stream))
         .map_err(|_| internal_error())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::WriteLocks;
+
+    /// A write that lands after longpoll has checked storage (found
+    /// nothing) but before it starts listening must still wake it — it
+    /// used to be missed, and the client sat out the full timeout (60 s by
+    /// default) for a change that had already happened.
+    #[tokio::test]
+    async fn longpoll_sees_a_write_landing_right_after_its_storage_check() {
+        let base = sled::Config::new().temporary(true).open().unwrap();
+        let db = Db::open(&base, "lp", &WriteLocks::default()).unwrap();
+        let feed = ChangeFeed::default();
+        let started = std::time::Instant::now();
+        let woke = wait_for_change(&db, &feed, 0, Duration::from_secs(3), || {
+            db.update_tree("doc", &feed, |tree| tree.insert_revision_chain(&["1-a".to_string()], false, json!({})))
+                .unwrap();
+        })
+        .await;
+        assert!(woke, "longpoll timed out instead of seeing the write");
+        assert!(started.elapsed() < Duration::from_secs(1), "took {:?}", started.elapsed());
+    }
 }

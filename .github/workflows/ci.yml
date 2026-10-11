@@ -71,6 +71,9 @@ jobs:
       - name: Acknowledged writes survive a hard kill
         run: node test/durability/run.js
 
+      - name: longpoll/continuous heartbeat and timeout
+        run: node test/feeds/run.js
+
       - name: _changes followers never skip a change
         run: node test/changes_follow/run.js
 

@@ -12,6 +12,8 @@
   survive. Needs the release binary (or `NYXDB_BIN`).
 - `changes_follow/` — polling and continuous `_changes` followers
   while many writers run; neither may miss a change.
+- `feeds/` — `_changes` longpoll/continuous `heartbeat` and `timeout`
+  on the wire.
 - `concurrency/` — many simultaneous writes to the same doc; every
   acknowledged revision must survive.
 - `revisions/` — revision history on the read paths: `_bulk_get` with
@@ -50,6 +52,9 @@ node test/durability/run.js
 
 # _changes followers under concurrent writes
 node test/changes_follow/run.js
+
+# longpoll/continuous heartbeat and timeout
+node test/feeds/run.js
 
 # Concurrent writers to one doc
 node test/concurrency/run.js

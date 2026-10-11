@@ -145,6 +145,25 @@ the separator in this server's storage namespace). Test:
 `test/databases/run.js` (11 routes on a missing db, 6 invalid names, one
 valid name using every allowed character class).
 
+**9. Longpoll could miss a write, and ignored `heartbeat` (medium).**
+Longpoll read the current seq, then subscribed; a write landing in
+between was missed and the client waited out the full timeout (60 s by
+default) for a change that had already happened. It now subscribes
+first, then checks storage. That race is microseconds wide, so it's
+pinned by a deterministic unit test that lands a write exactly in the
+gap (`longpoll_sees_a_write_landing_right_after_its_storage_check`) —
+it times out with the old order and passes with the new one.
+
+`heartbeat` was ignored on both longpoll and continuous feeds. PouchDB's
+live sync sends `feed=longpoll&heartbeat=10000` and aborts a request
+after heartbeat + 5 s of silence, so every idle longpoll was being cut
+off by the client and retried. Both feeds now write a newline every
+`heartbeat` ms while idle; on longpoll, as in CouchDB, a heartbeat
+overrides `timeout` and the eventual body is ordinary JSON after the
+newlines. `timeout` keeps working as before. Test: `test/feeds/run.js`
+(heartbeat on both feeds, the final body after heartbeats, `timeout`,
+prompt wake-up on a write).
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a
