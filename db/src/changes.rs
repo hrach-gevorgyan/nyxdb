@@ -1,5 +1,5 @@
 //! `_changes` feed plumbing: broadcast channel every write publishes to.
-//! Longpoll/continuous modes subscribe to the same channel. See plan §5.
+//! Longpoll/continuous modes subscribe to the same channel.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

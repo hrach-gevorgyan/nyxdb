@@ -28,7 +28,7 @@ impl RevTree {
         self.nodes.keys().filter(|id| !parents.contains(id)).collect()
     }
 
-    /// Winner-picking per plan §4.4: highest generation, then lexicographically
+    /// Winner-picking (CouchDB's rule): highest generation, then lexicographically
     /// highest hash as tiebreak, among non-deleted leaves (falls back to all
     /// leaves if every leaf is deleted).
     pub fn winner(&self) -> Option<&RevId> {
@@ -62,7 +62,7 @@ impl RevTree {
     }
 
     /// `_revs_diff` support: of the requested rev ids, which do we NOT
-    /// already have stored for this document (plan §3).
+    /// already have stored for this document.
     pub fn missing<'a>(&self, requested: &'a [RevId]) -> Vec<&'a RevId> {
         requested.iter().filter(|rev| !self.nodes.contains_key(*rev)).collect()
     }
@@ -301,7 +301,7 @@ mod tests {
     }
 
     /// Two branches of unequal depth: the deeper one wins regardless of
-    /// hash, since generation is compared first (plan §4.4 step 3).
+    /// hash, since generation is compared first.
     #[test]
     fn unequal_depth_branches_deeper_generation_wins_even_with_lower_hash() {
         let mut tree = RevTree::default();
@@ -313,7 +313,7 @@ mod tests {
         assert_eq!(tree.conflicts(), vec!["2-zzz".to_string()]);
     }
 
-    /// Once a client explicitly DELETEs the losing branch (plan §2.3: a
+    /// Once a client explicitly DELETEs the losing branch (a
     /// new deleted revision on top of it, the branch is never pruned),
     /// that branch drops out of `_conflicts` even though the node stays
     /// in the tree.
@@ -336,8 +336,8 @@ mod tests {
     }
 
     /// Deleting a document's only branch leaves every leaf deleted; the
-    /// tombstone is still reported as the "winner" (fallback case in
-    /// plan §4.4 step 3) so `GET` can report the doc as deleted rather
+    /// tombstone is still reported as the "winner" (the fallback
+    /// case of the winner rule) so `GET` can report the doc as deleted rather
     /// than silently 404ing as if it never existed.
     #[test]
     fn fully_deleted_document_winner_falls_back_to_tombstone() {
@@ -455,7 +455,7 @@ mod tests {
     /// A diverging chain pushed via `new_edits:false` (two devices editing
     /// the same rev independently) must create a real conflict, not
     /// silently overwrite — this is the actual case replication exists to
-    /// handle correctly (plan §1.2, §2.3).
+    /// handle correctly.
     #[test]
     fn insert_revision_chain_diverging_from_shared_ancestor_creates_conflict() {
         let mut tree = RevTree::default();

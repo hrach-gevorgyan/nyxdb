@@ -7,8 +7,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::normalize_path::NormalizePathLayer;
 use tower_http::trace::TraceLayer;
 
-/// CORS per plan §7: "only enable it as broadly as your actual client
-/// needs" — `origins=*` is convenient but a real widening of attack
+/// CORS only as broad as the actual client needs: `origins=*` is convenient but a real widening of attack
 /// surface once the server is reachable beyond a trusted LAN. Default
 /// is no CORS layer at all (same-origin only; doesn't affect non-browser
 /// clients like PouchDB in Node, which isn't subject to CORS). Set
@@ -42,38 +41,6 @@ fn cors_layer() -> Option<CorsLayer> {
             // unless told they may cache it.
             .max_age(std::time::Duration::from_secs(3600)),
     )
-}
-
-/// Per-request limits: at most `slots` requests in progress (more wait for
-/// a slot), and each answered 408 if it takes longer than `timeout` —
-/// including reading its body, so a stalled upload can't hold memory and
-/// a slot forever. `_changes` is exempt from both: a longpoll legitimately
-/// waits (its own `timeout`, default 60 s) and continuous feeds never end.
-#[derive(Clone)]
-struct Limits {
-    timeout: Option<std::time::Duration>,
-    slots: Arc<tokio::sync::Semaphore>,
-}
-
-async fn limit_requests(
-    axum::extract::State(limits): axum::extract::State<Limits>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    if request.uri().path().ends_with("/_changes") {
-        return next.run(request).await;
-    }
-    let _slot = limits.slots.acquire().await;
-    let Some(timeout) = limits.timeout else { return next.run(request).await };
-    match tokio::time::timeout(timeout, next.run(request)).await {
-        Ok(response) => response,
-        Err(_) => (
-            axum::http::StatusCode::REQUEST_TIMEOUT,
-            axum::Json(serde_json::json!({"error": "request_timeout", "reason": "request took longer than NYXDB_REQUEST_TIMEOUT_SECS"})),
-        )
-            .into_response(),
-    }
 }
 
 fn env_number(name: &str, default: u64) -> u64 {
@@ -188,11 +155,11 @@ async fn main() {
     if slots == 0 {
         fail(EXIT_CONFIG, "NYXDB_MAX_CONCURRENT_REQUESTS must be at least 1");
     }
-    let limits = Limits {
+    let limits = nyxdb::limits::Limits {
         timeout: (timeout_secs > 0).then(|| std::time::Duration::from_secs(timeout_secs)),
         slots: Arc::new(tokio::sync::Semaphore::new(slots as usize)),
     };
-    let mut app = app.layer(axum::middleware::from_fn_with_state(limits, limit_requests)).layer(TraceLayer::new_for_http());
+    let mut app = app.layer(axum::middleware::from_fn_with_state(limits, nyxdb::limits::limit_requests)).layer(TraceLayer::new_for_http());
     // CORS must wrap auth (outermost), not the other way round: tower_http's
     // CorsLayer answers OPTIONS preflight requests itself, and a preflight
     // never carries credentials — if auth ran first, every preflight would

@@ -1,4 +1,4 @@
-//! HTTP Basic auth (plan §5, §7). Never ship "admin party" (no auth) as
+//! HTTP Basic auth. Never ship "admin party" (no auth) as
 //! a default — CouchDB itself does this out of the box and it's a
 //! well-known footgun.
 
@@ -37,7 +37,7 @@ impl Credentials {
     /// by tests, and by anyone who wants to pin credentials explicitly).
     /// Otherwise, load a previously generated credentials file, or
     /// generate one now — random per-install, not a shared default
-    /// password, matching plan §7's baseline.
+    /// password.
     pub fn load_or_generate(data_dir: &Path) -> std::io::Result<Self> {
         if let (Ok(username), Ok(password)) =
             (std::env::var("NYXDB_USER"), std::env::var("NYXDB_PASSWORD"))

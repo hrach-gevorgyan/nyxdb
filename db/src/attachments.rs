@@ -1,4 +1,4 @@
-//! Attachment handling (Phase 4). Real CouchDB stores attachment bytes
+//! Attachment handling. Real CouchDB stores attachment bytes
 //! alongside the document; PouchDB's http adapter can send them either
 //! inline as base64 JSON (`_attachments.<name>.data`) or via
 //! `multipart/related`. This server only supports the inline JSON form

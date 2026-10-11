@@ -1,6 +1,6 @@
 //! sled-backed storage: one KV entry per document holding its serialized
-//! revision tree, plus an append-only `(seq, doc_id)` log for `_changes`.
-//! See plan §4.3, §5.
+//! revision tree, a `(seq, doc_id)` log for `_changes` (one entry per doc,
+//! its latest write), attachment bytes, and `_local` docs.
 
 use crate::changes::{ChangeEvent, ChangeFeed};
 use crate::revtree::{RevId, RevNode, RevTree, REVS_LIMIT};
@@ -496,6 +496,7 @@ pub fn server_uuid(root: &sled::Db) -> StorageResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
 
     /// Real bug found live-testing against a real PouchDB app: sled's
     /// `generate_id()` starts at 0, but `_changes?since=0` (what every
@@ -609,5 +610,36 @@ mod tests {
         };
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(first, second, "the uuid must be the same after reopening the data dir");
+    }
+
+    /// Compaction deletes the bytes of attachments no revision uses any
+    /// more — replaced ones, and ones only a pruned (non-leaf) revision had
+    /// — and keeps every leaf's, conflict branches included.
+    #[test]
+    fn compaction_collects_only_unreferenced_attachments() {
+        let base = sled::Config::new().temporary(true).open().unwrap();
+        let db = Db::open(&base, "gc", &WriteLocks::default()).unwrap();
+        let feed = ChangeFeed::default();
+        let stub = |data: &[u8]| {
+            let digest = crate::attachments::store_raw_attachment(&db, data).unwrap();
+            json!({"_attachments": {"f": {"stub": true, "digest": digest, "length": data.len()}}})
+        };
+        let write = |revs: &[&str], body: Value| {
+            let revs: Vec<String> = revs.iter().map(|r| r.to_string()).collect();
+            db.update_tree("doc", &feed, |tree| tree.insert_revision_chain(&revs, false, body)).unwrap();
+        };
+        let (old, kept, branch) = (stub(b"old"), stub(b"kept"), stub(b"branch"));
+        write(&["1-a"], old.clone());
+        write(&["2-b", "1-a"], kept.clone());
+        write(&["2-c", "1-a"], branch.clone());
+        stub(b"never referenced");
+
+        assert_eq!(db.compact_attachments().unwrap(), 2);
+        let digest = |body: &Value| body["_attachments"]["f"]["digest"].as_str().unwrap().to_string();
+        assert!(db.get_attachment(&digest(&kept)).unwrap().is_some());
+        assert!(db.get_attachment(&digest(&branch)).unwrap().is_some());
+        assert!(db.get_attachment(&digest(&old)).unwrap().is_none());
+        assert_eq!(db.attachments.len(), 2);
+        assert_eq!(db.compact_attachments().unwrap(), 0);
     }
 }
