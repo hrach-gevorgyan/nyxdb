@@ -164,6 +164,32 @@ newlines. `timeout` keeps working as before. Test: `test/feeds/run.js`
 (heartbeat on both feeds, the final body after heartbeats, `timeout`,
 prompt wake-up on a write).
 
+**10. sled resource limits (medium).** Three parts:
+
+- *Startup failures panicked* (exit 101, "thread 'main' panicked",
+  backtrace hint) for every cause alike. They now print one line and
+  exit 2 (bad setting), 3 (data directory unusable) or 4 (can't listen),
+  so Offlog can tell the user why its sidecar didn't start. Invalid
+  `NYXDB_MAX_BODY_BYTES` used to be silently ignored; it's now exit 2
+  too. Test: `test/startup/run.js`.
+- *Memory grew with the data.* sled's page cache defaults to 1 GB.
+  Measured with 100 MB of 2 KB docs: ~195 MB resident after writing,
+  ~163 MB after reading it back in a fresh process. Capped at 32 MB by
+  default (`NYXDB_CACHE_MB`): ~105 MB. The review suggested 32–64 MB;
+  64 MB measured ~150 MB, because sled undercounts real memory by about
+  2×, so 32 it is. Test: `test/memory/run.js` (spawns its own server;
+  fails at sled's old default). **Known limit, measured and documented
+  rather than fixed:** in sled 0.34 the cap does not bound large values
+  (~1 MB each) — 200 MB of 1 MB docs reaches ~230 MB resident with an
+  8 MB or a 1 GB cap alike. The real fix is storing attachment bytes
+  outside sled; left as an open decision.
+- *Slow requests stalled everything.* sled calls ran on tokio's async
+  workers (one per CPU), so a few full `_changes` scans of a large db
+  stalled even `GET /` (measured: 1.3–1.5 s). Storage work in every
+  handler now runs via `block_in_place`, which hands the worker's other
+  tasks to another thread. Test: `test/blocking/run.js` (80 scans of a
+  20k-doc db while timing `GET /`; 1,025 ms with the fix removed).
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a

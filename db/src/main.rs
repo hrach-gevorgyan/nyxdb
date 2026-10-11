@@ -40,6 +40,21 @@ fn cors_layer() -> Option<CorsLayer> {
     )
 }
 
+/// Startup exit codes, so whatever launches NyxDB (Offlog runs it as a
+/// sidecar) can tell failures apart without parsing text.
+const EXIT_CONFIG: i32 = 2;
+const EXIT_DATA: i32 = 3;
+const EXIT_LISTEN: i32 = 4;
+
+/// Reports a startup failure plainly — one line on stderr (and in the
+/// log), a distinct exit code — instead of a panic message, a backtrace
+/// hint, and exit code 101 for every kind of failure alike.
+fn fail(code: i32, message: &str) -> ! {
+    tracing::error!("{message}");
+    eprintln!("nyxdb: {message}");
+    std::process::exit(code);
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -56,14 +71,36 @@ async fn main() {
     // speed-vs-size experiment.
     let mut config = sled::Config::new().path(&data_dir).use_compression(true);
     if let Ok(level) = std::env::var("NYXDB_COMPRESSION_LEVEL") {
-        let level: i32 = level.parse().expect("NYXDB_COMPRESSION_LEVEL must be an integer 1-22");
-        config = config.compression_factor(level);
+        match level.parse::<i32>() {
+            Ok(level) if (1..=22).contains(&level) => config = config.compression_factor(level),
+            _ => fail(EXIT_CONFIG, &format!("NYXDB_COMPRESSION_LEVEL must be an integer from 1 to 22, got {level:?}")),
+        }
     }
-    let root = Arc::new(config.open().expect("failed to open sled database"));
+    // sled's page cache defaults to 1 GB, so memory grew with the data the
+    // server touched (measured with 100 MB of small docs: ~195 MB resident
+    // after writing, ~163 MB after reading it back). sled's accounting
+    // undercounts real memory by roughly 2x, so 32 MB of cache keeps the
+    // same workload under ~120 MB (see test/memory). NYXDB_CACHE_MB to
+    // tune. Known limit: in sled 0.34 the cap doesn't bound *large* values
+    // (~1 MB each); memory then tracks the data touched — doc/USAGE.md.
+    let cache_mb: u64 = match std::env::var("NYXDB_CACHE_MB") {
+        Err(_) => 32,
+        Ok(v) => match v.parse() {
+            Ok(mb) if mb > 0 => mb,
+            _ => fail(EXIT_CONFIG, &format!("NYXDB_CACHE_MB must be a positive number of megabytes, got {v:?}")),
+        },
+    };
+    config = config.cache_capacity(cache_mb * 1024 * 1024);
+    let root = match config.open() {
+        Ok(root) => Arc::new(root),
+        Err(e) => fail(EXIT_DATA, &format!("can't open the data directory {data_dir:?}: {e}")),
+    };
     let flush_root = root.clone();
-    let server_uuid = nyxdb::storage::server_uuid(&root).expect("failed to read or create the server uuid");
+    let server_uuid = nyxdb::storage::server_uuid(&root)
+        .unwrap_or_else(|e| fail(EXIT_DATA, &format!("can't read or create the server id in {data_dir:?}: {e}")));
 
-    let creds = Credentials::load_or_generate(Path::new(&data_dir)).expect("failed to load/generate credentials");
+    let creds = Credentials::load_or_generate(Path::new(&data_dir))
+        .unwrap_or_else(|e| fail(EXIT_DATA, &format!("can't read or create {data_dir}/credentials.json: {e}")));
     tracing::info!(
         "HTTP Basic auth required for all requests except GET / — username: {}, password: see {}/credentials.json (or NYXDB_USER/NYXDB_PASSWORD)",
         creds.username,
@@ -76,10 +113,12 @@ async fn main() {
     // _bulk_docs sync batch without being effectively unlimited;
     // override via NYXDB_MAX_BODY_BYTES if a deployment needs
     // something different.
-    let max_body_bytes: usize = std::env::var("NYXDB_MAX_BODY_BYTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(50 * 1024 * 1024);
+    let max_body_bytes: usize = match std::env::var("NYXDB_MAX_BODY_BYTES") {
+        Err(_) => 50 * 1024 * 1024,
+        Ok(v) => v
+            .parse()
+            .unwrap_or_else(|_| fail(EXIT_CONFIG, &format!("NYXDB_MAX_BODY_BYTES must be a number of bytes, got {v:?}"))),
+    };
 
     let mut app = build_router(AppState {
         root,
@@ -94,7 +133,7 @@ async fn main() {
     // never carries credentials — if auth ran first, every preflight would
     // 401 before CORS got a chance to respond.
     if let Some(cors) = cors_layer() {
-        tracing::info!("CORS enabled: NYXDB_CORS_ORIGINS = {}", std::env::var("NYXDB_CORS_ORIGINS").unwrap());
+        tracing::info!("CORS enabled: NYXDB_CORS_ORIGINS = {}", std::env::var("NYXDB_CORS_ORIGINS").unwrap_or_default());
         app = app.layer(cors);
     } else {
         tracing::info!("CORS disabled (same-origin only) — set NYXDB_CORS_ORIGINS to enable for a browser client");
@@ -107,7 +146,10 @@ async fn main() {
     let app = tower::make::Shared::new(app);
 
     let addr = std::env::var("NYXDB_ADDR").unwrap_or_else(|_| "127.0.0.1:5984".into());
-    let listener = tokio::net::TcpListener::bind(&addr).await.expect("failed to bind address");
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(e) => fail(EXIT_LISTEN, &format!("can't listen on {addr} (NYXDB_ADDR): {e}")),
+    };
     tracing::info!("listening on {addr}");
 
     // Every write is already flushed before it's acknowledged (handlers

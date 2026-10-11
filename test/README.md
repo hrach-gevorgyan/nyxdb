@@ -5,6 +5,11 @@
   editing an already-replicated doc without creating phantom conflicts,
   and (`checkpoint_resume.js`, spawns its own server on port 8298)
   resuming from the replication checkpoint across a server restart.
+- `startup/` — startup failures exit with a clear message and code 2/3/4,
+  never a panic. Spawns its own server.
+- `memory/` — memory stays bounded while ~100 MB of small docs are
+  written and read back. Spawns its own server.
+- `blocking/` — `GET /` stays fast while many full `_changes` scans run.
 - `databases/` — only `PUT /{db}` creates a database, with a valid
   name; every other route on a missing db is a 404.
 - `durability/` — spawns its own server, hard-kills it right after
@@ -43,6 +48,11 @@ node test/integration/run.js
 node test/integration/live_sync.js
 node test/integration/edit_replication.js
 node test/integration/checkpoint_resume.js   # spawns its own server
+
+# Startup failures, memory bound (both spawn their own server), stalls
+node test/startup/run.js
+node test/memory/run.js
+node test/blocking/run.js
 
 # Database creation and naming
 node test/databases/run.js

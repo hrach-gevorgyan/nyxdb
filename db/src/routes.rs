@@ -38,10 +38,12 @@ impl AppState {
     /// of silently creating it (a typo'd db name in a sync URL used to
     /// produce an empty db and a "successful" sync into it).
     fn db(&self, name: &str) -> Result<Db, ApiError> {
-        if !crate::storage::db_exists(&self.root, name) {
-            return Err(db_not_found());
-        }
-        Db::open(&self.root, name, &self.locks).map_err(|_| internal_error())
+        blocking(|| {
+            if !crate::storage::db_exists(&self.root, name) {
+                return Err(db_not_found());
+            }
+            Db::open(&self.root, name, &self.locks).map_err(|_| internal_error())
+        })
     }
 }
 
@@ -138,10 +140,27 @@ async fn server_info(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
+/// Runs storage work without stalling the async workers. sled calls block
+/// the thread they run on; done directly in a handler they occupied one of
+/// tokio's few async worker threads (one per CPU), so a handful of slow
+/// requests — full `_changes` scans of a big db — left nothing to answer
+/// even `GET /` (measured: 1.3–1.5 s). `block_in_place` tells the runtime
+/// this worker is about to block, so its other tasks move to another
+/// thread. Used in handlers only, never inside `Db`: it panics on the
+/// single-threaded runtime unit tests use.
+fn blocking<T>(work: impl FnOnce() -> T) -> T {
+    tokio::task::block_in_place(work)
+}
+
 async fn create_db(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    blocking(|| create_db_blocking(&state, &db_name))
+}
+
+fn create_db_blocking(state: &AppState, db_name: &str) -> Result<Json<Value>, ApiError> {
+    let db_name = db_name.to_string();
     if !crate::storage::valid_db_name(&db_name) {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -160,9 +179,11 @@ async fn db_info(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = state.db(&db_name)?;
-    let doc_count = db.docs.len();
-    Ok(Json(json!({"db_name": db_name, "doc_count": doc_count})))
+    blocking(|| {
+        let db = state.db(&db_name)?;
+        let doc_count = db.docs.len();
+        Ok(Json(json!({"db_name": db_name, "doc_count": doc_count})))
+    })
 }
 
 /// `DELETE /{db}` — not part of the replication protocol proper (a
@@ -174,13 +195,15 @@ async fn delete_db(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    if !crate::storage::db_exists(&state.root, &db_name) {
-        return Err(db_not_found());
-    }
-    for suffix in ["docs", "local", "seq", "seqidx", "attachments", "attmd5"] {
-        state.root.drop_tree(format!("{db_name}::{suffix}")).map_err(|_| internal_error())?;
-    }
-    Ok(Json(json!({"ok": true})))
+    blocking(|| {
+        if !crate::storage::db_exists(&state.root, &db_name) {
+            return Err(db_not_found());
+        }
+        for suffix in ["docs", "local", "seq", "seqidx", "attachments", "attmd5"] {
+            state.root.drop_tree(format!("{db_name}::{suffix}")).map_err(|_| internal_error())?;
+        }
+        Ok(Json(json!({"ok": true})))
+    })
 }
 
 /// The body of one stored revision, as every read path returns it:
@@ -275,14 +298,18 @@ async fn get_doc(
     Path((db_name, id)): Path<(String, String)>,
     Query(params): Query<GetDocParams>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = state.db(&db_name)?;
-    let tree = db.get_tree(&id).map_err(|_| internal_error())?;
+    blocking(|| get_doc_blocking(&state, &db_name, &id, &params))
+}
+
+fn get_doc_blocking(state: &AppState, db_name: &str, id: &str, params: &GetDocParams) -> Result<Json<Value>, ApiError> {
+    let db = state.db(db_name)?;
+    let tree = db.get_tree(id).map_err(|_| internal_error())?;
     let tree = tree.ok_or_else(not_found)?;
     if let Some(open_revs) = params.open_revs.as_deref() {
-        return open_revs_response(&db, &tree, &id, open_revs, &params).map(Json);
+        return open_revs_response(&db, &tree, id, open_revs, params).map(Json);
     }
     let (winner, node) = resolve_rev(&tree, params.rev.as_deref())?;
-    let mut body = outgoing_body(&db, &tree, &id, winner, node, params.revs);
+    let mut body = outgoing_body(&db, &tree, id, winner, node, params.revs);
     if params.revs_info {
         let info: Vec<Value> = tree
             .ancestry(winner)
@@ -386,7 +413,7 @@ async fn put_doc(
         if let Some(obj) = body.as_object_mut() {
             obj.insert("_id".to_string(), json!(id));
         }
-        let rev = write_doc_new_edits_false(&db, &feed, &id, &body).map_err(|reason| match reason {
+        let rev = blocking(|| write_doc_new_edits_false(&db, &feed, &id, &body)).map_err(|reason| match reason {
             "missing _rev" => ApiError(StatusCode::BAD_REQUEST, "bad_request", "missing _rev"),
             "invalid attachment data" => ApiError(StatusCode::BAD_REQUEST, "bad_request", "invalid attachment data"),
             "missing_stub" => attachment_error(crate::attachments::AttachmentError::MissingStub(String::new())),
@@ -396,9 +423,11 @@ async fn put_doc(
         return Ok(Json(json!({"ok": true, "id": id, "rev": rev})));
     }
 
-    let previous = current_body(&db, &id);
-    crate::attachments::extract_inline_attachments(&db, &mut body, previous.as_ref()).map_err(attachment_error)?;
-    let rev = write_doc(&db, &feed, &id, body).map_err(|_| internal_error())?;
+    let rev = blocking(|| {
+        let previous = current_body(&db, &id);
+        crate::attachments::extract_inline_attachments(&db, &mut body, previous.as_ref()).map_err(attachment_error)?;
+        write_doc(&db, &feed, &id, body).map_err(|_| internal_error())
+    })?;
     db.flush().await.map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
 }
@@ -417,15 +446,17 @@ async fn get_attachment(
     Path((db_name, id, attname)): Path<(String, String, String)>,
     Query(params): Query<AttachmentParams>,
 ) -> Result<Response, ApiError> {
-    let db = state.db(&db_name)?;
-    let tree = db.get_tree(&id).map_err(|_| internal_error())?.ok_or_else(not_found)?;
-    let (_, node) = resolve_rev(&tree, params.rev.as_deref())?;
-    let stub = node.body.get("_attachments").and_then(|a| a.get(&attname)).ok_or_else(not_found)?;
-    let digest = stub.get("digest").and_then(Value::as_str).ok_or_else(internal_error)?;
-    let content_type =
-        stub.get("content_type").and_then(Value::as_str).unwrap_or("application/octet-stream").to_string();
-    let bytes = db.get_attachment(digest).map_err(|_| internal_error())?.ok_or_else(not_found)?;
-    Response::builder().header(header::CONTENT_TYPE, content_type).body(Body::from(bytes)).map_err(|_| internal_error())
+    blocking(|| {
+        let db = state.db(&db_name)?;
+        let tree = db.get_tree(&id).map_err(|_| internal_error())?.ok_or_else(not_found)?;
+        let (_, node) = resolve_rev(&tree, params.rev.as_deref())?;
+        let stub = node.body.get("_attachments").and_then(|a| a.get(&attname)).ok_or_else(not_found)?;
+        let digest = stub.get("digest").and_then(Value::as_str).ok_or_else(internal_error)?;
+        let content_type =
+            stub.get("content_type").and_then(Value::as_str).unwrap_or("application/octet-stream").to_string();
+        let bytes = db.get_attachment(digest).map_err(|_| internal_error())?.ok_or_else(not_found)?;
+        Response::builder().header(header::CONTENT_TYPE, content_type).body(Body::from(bytes)).map_err(|_| internal_error())
+    })
 }
 
 /// `PUT /{db}/{id}/{attname}` — upload a single attachment directly:
@@ -448,22 +479,23 @@ async fn put_attachment(
         .to_string();
 
     let db = state.db(&db_name)?;
-    let mut doc_body = match db.get_tree(&id).map_err(|_| internal_error())? {
-        Some(tree) => match tree.winner() {
-            Some(winner) if !tree.nodes[winner].deleted => tree.nodes[winner].body.clone(),
-            _ => json!({}),
-        },
-        None => json!({}),
-    };
-    let digest = crate::attachments::store_raw_attachment(&db, &body).map_err(|_| internal_error())?;
-    if doc_body.get("_attachments").is_none() {
-        doc_body["_attachments"] = json!({});
-    }
-    doc_body["_attachments"][&attname] =
-        json!({"content_type": content_type, "digest": digest, "length": body.len(), "stub": true});
-
     let feed = state.feeds.get_or_create(&db_name);
-    let rev = write_doc(&db, &feed, &id, doc_body).map_err(|_| internal_error())?;
+    let rev = blocking(|| {
+        let mut doc_body = match db.get_tree(&id).map_err(|_| internal_error())? {
+            Some(tree) => match tree.winner() {
+                Some(winner) if !tree.nodes[winner].deleted => tree.nodes[winner].body.clone(),
+                _ => json!({}),
+            },
+            None => json!({}),
+        };
+        let digest = crate::attachments::store_raw_attachment(&db, &body).map_err(|_| internal_error())?;
+        if doc_body.get("_attachments").is_none() {
+            doc_body["_attachments"] = json!({});
+        }
+        doc_body["_attachments"][&attname] =
+            json!({"content_type": content_type, "digest": digest, "length": body.len(), "stub": true});
+        write_doc(&db, &feed, &id, doc_body).map_err(|_| internal_error())
+    })?;
     db.flush().await.map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
 }
@@ -477,18 +509,21 @@ async fn delete_attachment(
     Path((db_name, id, attname)): Path<(String, String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let db = state.db(&db_name)?;
-    let tree = db.get_tree(&id).map_err(|_| internal_error())?.ok_or_else(not_found)?;
-    let winner = tree.winner().ok_or_else(not_found)?;
-    if tree.nodes[winner].deleted {
-        return Err(deleted());
-    }
-    let mut body = tree.nodes[winner].body.clone();
-    let removed = body.get_mut("_attachments").and_then(Value::as_object_mut).and_then(|obj| obj.remove(&attname));
-    if removed.is_none() {
-        return Err(not_found());
-    }
     let feed = state.feeds.get_or_create(&db_name);
-    let rev = write_doc(&db, &feed, &id, body).map_err(|_| internal_error())?;
+    let rev = blocking(|| {
+        let tree = db.get_tree(&id).map_err(|_| internal_error())?.ok_or_else(not_found)?;
+        let winner = tree.winner().ok_or_else(not_found)?;
+        if tree.nodes[winner].deleted {
+            return Err(deleted());
+        }
+        let mut body = tree.nodes[winner].body.clone();
+        let removed =
+            body.get_mut("_attachments").and_then(Value::as_object_mut).and_then(|obj| obj.remove(&attname));
+        if removed.is_none() {
+            return Err(not_found());
+        }
+        write_doc(&db, &feed, &id, body).map_err(|_| internal_error())
+    })?;
     db.flush().await.map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
 }
@@ -499,12 +534,14 @@ async fn get_local(
     State(state): State<AppState>,
     Path((db_name, id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = state.db(&db_name)?;
-    let bytes = db.local.get(&id).map_err(|_| internal_error())?;
-    let bytes = bytes.ok_or_else(not_found)?;
-    let mut body: Value = serde_json::from_slice(&bytes).map_err(|_| internal_error())?;
-    body["_id"] = json!(format!("_local/{id}"));
-    Ok(Json(body))
+    blocking(|| {
+        let db = state.db(&db_name)?;
+        let bytes = db.local.get(&id).map_err(|_| internal_error())?;
+        let bytes = bytes.ok_or_else(not_found)?;
+        let mut body: Value = serde_json::from_slice(&bytes).map_err(|_| internal_error())?;
+        body["_id"] = json!(format!("_local/{id}"));
+        Ok(Json(body))
+    })
 }
 
 async fn put_local(
@@ -517,7 +554,7 @@ async fn put_local(
         obj.remove("_id");
     }
     let bytes = serde_json::to_vec(&body).map_err(|_| internal_error())?;
-    db.local.insert(&id, bytes).map_err(|_| internal_error())?;
+    blocking(|| db.local.insert(&id, bytes)).map_err(|_| internal_error())?;
     db.flush().await.map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true, "id": format!("_local/{id}"), "rev": "0-1"})))
 }
@@ -543,11 +580,13 @@ async fn bulk_docs(
         .ok_or(ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
     let new_edits = payload.get("new_edits").and_then(Value::as_bool).unwrap_or(true);
 
-    let response = if new_edits {
-        bulk_docs_new_edits_true(&db, &feed, docs)
-    } else {
-        bulk_docs_new_edits_false(&db, &feed, docs)
-    }?;
+    let response = blocking(|| {
+        if new_edits {
+            bulk_docs_new_edits_true(&db, &feed, docs)
+        } else {
+            bulk_docs_new_edits_false(&db, &feed, docs)
+        }
+    })?;
     // One flush per batch, before acknowledging any of it.
     db.flush().await.map_err(|_| internal_error())?;
     Ok(response)
@@ -683,7 +722,11 @@ async fn revs_diff(
     Path(db_name): Path<String>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = state.db(&db_name)?;
+    blocking(|| revs_diff_blocking(&state, &db_name, &payload))
+}
+
+fn revs_diff_blocking(state: &AppState, db_name: &str, payload: &Value) -> Result<Json<Value>, ApiError> {
+    let db = state.db(db_name)?;
     let requested = payload.as_object().ok_or(ApiError(StatusCode::BAD_REQUEST, "bad_request", "bad_request"))?;
 
     let mut result = serde_json::Map::new();
@@ -721,7 +764,11 @@ async fn bulk_get(
     Query(params): Query<BulkGetParams>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let db = state.db(&db_name)?;
+    blocking(|| bulk_get_blocking(&state, &db_name, &params, &payload))
+}
+
+fn bulk_get_blocking(state: &AppState, db_name: &str, params: &BulkGetParams, payload: &Value) -> Result<Json<Value>, ApiError> {
+    let db = state.db(db_name)?;
     let requests = payload
         .get("docs")
         .and_then(Value::as_array)
@@ -847,9 +894,9 @@ async fn changes(
 
     let heartbeat = heartbeat_of(&params);
     match params.feed.as_deref() {
-        Some("continuous") => changes_continuous(state, db_name, db, since, style_all_docs, heartbeat),
+        Some("continuous") => blocking(|| changes_continuous(state, db_name, db, since, style_all_docs, heartbeat)),
         Some("longpoll") => changes_longpoll(state, db_name, db, since, style_all_docs, params.timeout, heartbeat).await,
-        _ => changes_normal(&db, since, style_all_docs),
+        _ => blocking(|| changes_normal(&db, since, style_all_docs)),
     }
 }
 
@@ -913,7 +960,7 @@ async fn changes_longpoll(
     let feed = state.feeds.get_or_create(&db_name);
     let Some(heartbeat) = heartbeat else {
         wait_for_change(&db, &feed, since, Duration::from_millis(timeout_ms.unwrap_or(60_000)), || {}).await;
-        return changes_normal(&db, since, style_all_docs);
+        return blocking(|| changes_normal(&db, since, style_all_docs));
     };
     // With a heartbeat, CouchDB waits as long as it takes (the heartbeat
     // overrides `timeout`) and writes a newline every `heartbeat` so the
@@ -923,7 +970,7 @@ async fn changes_longpoll(
     let stream = futures::stream::unfold(Some((db, feed)), move |state| async move {
         let (db, feed) = state?;
         let line = if wait_for_change(&db, &feed, since, heartbeat, || {}).await {
-            match changes_body(&db, since, style_all_docs) {
+            match blocking(|| changes_body(&db, since, style_all_docs)) {
                 Ok(body) => return Some((Ok::<_, std::io::Error>(Bytes::from(body.to_string())), None)),
                 Err(_) => return None,
             }
@@ -999,7 +1046,7 @@ fn changes_continuous(
     let stream = futures::stream::unfold(initial, |mut st| async move {
         loop {
             if let Some((seq, id)) = st.queue.pop_front() {
-                if let Some(row) = build_change_row(&st.db, seq, &id, st.style_all_docs) {
+                if let Some(row) = blocking(|| build_change_row(&st.db, seq, &id, st.style_all_docs)) {
                     st.last_seq = st.last_seq.max(seq);
                     return Some((Ok::<_, std::io::Error>(Bytes::from(format!("{row}\n"))), st));
                 }
@@ -1018,13 +1065,13 @@ fn changes_continuous(
                     if event.seq <= st.last_seq {
                         continue;
                     }
-                    if let Some(row) = build_change_row(&st.db, event.seq, &event.doc_id, st.style_all_docs) {
+                    if let Some(row) = blocking(|| build_change_row(&st.db, event.seq, &event.doc_id, st.style_all_docs)) {
                         st.last_seq = event.seq;
                         return Some((Ok(Bytes::from(format!("{row}\n"))), st));
                     }
                     continue;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => match st.db.changes_since(st.last_seq) {
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => match blocking(|| st.db.changes_since(st.last_seq)) {
                     Ok(missed) => {
                         st.queue = dedupe_latest(missed).into_iter().collect();
                         continue;

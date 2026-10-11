@@ -48,8 +48,28 @@ curl -u admin:<password> -X PUT http://127.0.0.1:5984/mydb     # needs auth
 | `NYXDB_USER` | generated | admin username |
 | `NYXDB_PASSWORD` | generated | admin password (set together with the username above) |
 | `NYXDB_CORS_ORIGINS` | unset (CORS off) | comma-separated allowed origins, no wildcard |
+| `NYXDB_CACHE_MB` | `32` | sled page-cache size; real memory is roughly 25 MB + 2× this (see below) |
+| `NYXDB_COMPRESSION_LEVEL` | sled's default (5) | zstd level, 1–22 |
+| `NYXDB_MAX_BODY_BYTES` | `52428800` (50 MB) | largest accepted request body |
 
 Source: `db/src/main.rs`, `db/src/auth.rs`.
+
+**Startup failures** print one line to stderr and exit with a code you
+can act on, instead of panicking: `2` = a setting above is invalid
+(named in the message), `3` = the data directory can't be opened or
+initialised, `4` = can't listen on `NYXDB_ADDR` (e.g. port already in
+use).
+
+**Memory.** Measured with 100 MB of small (2 KB) docs: ~105 MB resident
+at the default cache size, versus ~195 MB with sled's own 1 GB default.
+Known limit: in sled 0.34 the cache cap does *not* bound large values
+(~1 MB each, e.g. big attachments) — memory then tracks the data
+touched (200 MB of 1 MB docs → ~230 MB, with any cap). Offlog-sized
+databases are far below that; keeping attachment bytes outside sled
+would remove the limit and is an open option.
+
+Storage work runs on tokio's blocking pool, so slow requests (a full
+`_changes` scan of a large db) don't stall unrelated ones.
 
 ## 4. Endpoints
 

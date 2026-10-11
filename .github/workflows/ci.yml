@@ -65,6 +65,15 @@ jobs:
           node test/integration/edit_replication.js
           node test/integration/checkpoint_resume.js
 
+      - name: Startup failures exit cleanly
+        run: node test/startup/run.js
+
+      - name: Memory stays bounded as data grows
+        run: node test/memory/run.js
+
+      - name: Slow storage work does not stall other requests
+        run: node test/blocking/run.js
+
       - name: Databases are only created by PUT /{db}
         run: node test/databases/run.js
 

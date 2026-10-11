@@ -69,7 +69,10 @@ function continuousFollower(db, seen) {
       if (err.name !== "AbortError") throw err;
     }
   })();
-  return { stop: () => controller.abort(), done };
+  // Resolve to the stream's error (or null) instead of rejecting, so a
+  // dropped connection is reported as a failed check, never an unhandled
+  // rejection that kills the process with no FAIL line.
+  return { stop: () => controller.abort(), done: done.then(() => null, (err) => err) };
 }
 
 async function main() {
@@ -111,7 +114,8 @@ async function main() {
     const deadline = Date.now() + 5000;
     while (streamed.size < expected.size && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
     stream.stop();
-    await stream.done;
+    const streamError = await stream.done;
+    check("continuous follower's connection stayed up", streamError === null, String(streamError?.cause || streamError));
 
     const missingPolled = [...expected].filter((id) => !polled.has(id));
     const missingStreamed = [...expected].filter((id) => !streamed.has(id));
