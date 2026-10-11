@@ -70,9 +70,12 @@ function rustChecks() {
     ["clippy (zero findings)", ["clippy", "--release", "--all-targets"]],
   ]) {
     const r = cargo(cmd);
-    const findings = (r.stderr.match(/^(warning|error)/gm) || []).length;
+    const lines = r.stderr.split("\n");
+    const isFinding = (l) => l.startsWith("warning") || l.startsWith("error");
+    const findings = lines.filter(isFinding).length;
     record(name, r.status === 0 && findings === 0, findings ? `${findings} finding(s)` : "");
-    if (r.status !== 0 || findings) console.log(r.stderr.split("\n").filter((l) => /^(warning|error)|-->/.test(l)).slice(0, 20).join("\n"));
+    // Each finding, plus its "--> file:line" location line.
+    if (r.status !== 0 || findings) console.log(lines.filter((l) => isFinding(l) || l.trimStart().startsWith("-->")).slice(0, 20).join("\n"));
     if (r.status !== 0) return false;
   }
   const t = cargo(["test", "--release"]);

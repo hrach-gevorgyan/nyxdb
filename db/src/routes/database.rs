@@ -146,7 +146,7 @@ pub(super) async fn all_docs_keys(
 ) -> Result<Json<Value>, ApiError> {
     blocking(|| {
         let db = state.db(&db_name)?;
-        let mut rows = Vec::with_capacity(body.keys.len());
+        let mut rows = Vec::new();
         for id in &body.keys {
             rows.push(match winner_state(&db, id)? {
                 None => json!({"key": id, "error": "not_found"}),
