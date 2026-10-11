@@ -10,5 +10,6 @@ livetest_*/
 edittest_*/
 ckpt_local_*/
 att_conflict_local_*/
+att_redownload_local_*/
 data-*/
 credentials.json

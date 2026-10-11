@@ -163,7 +163,7 @@ async fn delete_db(
     if !existed {
         return Err(not_found());
     }
-    for suffix in ["docs", "local", "seq", "seqidx", "attachments"] {
+    for suffix in ["docs", "local", "seq", "seqidx", "attachments", "attmd5"] {
         state.root.drop_tree(format!("{db_name}::{suffix}")).map_err(|_| internal_error())?;
     }
     Ok(Json(json!({"ok": true})))
@@ -189,6 +189,32 @@ fn revision_body(tree: &RevTree, id: &str, rev: &str, node: &RevNode, revs: bool
         }
     }
     body
+}
+
+/// `revision_body` plus the attachment-digest presentation every
+/// outgoing doc needs (see `attachments::present_digests`).
+fn outgoing_body(db: &Db, tree: &RevTree, id: &str, rev: &str, node: &RevNode, revs: bool) -> Value {
+    let mut body = revision_body(tree, id, rev, node, revs);
+    crate::attachments::present_digests(db, &mut body);
+    body
+}
+
+/// The current winner's body, if it's live — what a bare `{"stub":true}`
+/// on an app write refers back to.
+fn current_body(db: &Db, id: &str) -> Option<Value> {
+    let tree = db.get_tree(id).ok().flatten()?;
+    let winner = tree.winner()?;
+    let node = &tree.nodes[winner];
+    (!node.deleted).then(|| node.body.clone())
+}
+
+fn attachment_error(err: crate::attachments::AttachmentError) -> ApiError {
+    match err {
+        crate::attachments::AttachmentError::Invalid => ApiError(StatusCode::BAD_REQUEST, "bad_request", "invalid attachment data"),
+        crate::attachments::AttachmentError::MissingStub(_) => {
+            ApiError(StatusCode::PRECONDITION_FAILED, "missing_stub", "attachment stub refers to data the server does not have")
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -242,7 +268,7 @@ async fn get_doc(
         return open_revs_response(&db, &tree, &id, open_revs, &params).map(Json);
     }
     let (winner, node) = resolve_rev(&tree, params.rev.as_deref())?;
-    let mut body = revision_body(&tree, &id, winner, node, params.revs);
+    let mut body = outgoing_body(&db, &tree, &id, winner, node, params.revs);
     if params.revs_info {
         let info: Vec<Value> = tree
             .ancestry(winner)
@@ -306,7 +332,7 @@ fn open_revs_response(
             if !seen.insert(r.clone()) {
                 continue;
             }
-            let mut body = revision_body(tree, id, &r, &tree.nodes[&r], params.revs);
+            let mut body = outgoing_body(db, tree, id, &r, &tree.nodes[&r], params.revs);
             if params.attachments {
                 crate::attachments::inflate_attachments(db, &mut body);
             }
@@ -349,14 +375,15 @@ async fn put_doc(
         let rev = write_doc_new_edits_false(&db, &feed, &id, &body).map_err(|reason| match reason {
             "missing _rev" => ApiError(StatusCode::BAD_REQUEST, "bad_request", "missing _rev"),
             "invalid attachment data" => ApiError(StatusCode::BAD_REQUEST, "bad_request", "invalid attachment data"),
+            "missing_stub" => attachment_error(crate::attachments::AttachmentError::MissingStub(String::new())),
             _ => internal_error(),
         })?;
         db.flush().await.map_err(|_| internal_error())?;
         return Ok(Json(json!({"ok": true, "id": id, "rev": rev})));
     }
 
-    crate::attachments::extract_inline_attachments(&db, &mut body)
-        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "bad_request", "invalid attachment data"))?;
+    let previous = current_body(&db, &id);
+    crate::attachments::extract_inline_attachments(&db, &mut body, previous.as_ref()).map_err(attachment_error)?;
     let rev = write_doc(&db, &feed, &id, body).map_err(|_| internal_error())?;
     db.flush().await.map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true, "id": id, "rev": rev})))
@@ -526,9 +553,17 @@ fn bulk_docs_new_edits_true(db: &Db, feed: &ChangeFeed, docs: &[Value]) -> Resul
             obj.remove("_rev");
         }
 
-        if let Err(_reason) = crate::attachments::extract_inline_attachments(db, &mut doc) {
-            results.push(json!({"id": id, "error": "bad_request", "reason": "invalid attachment data"}));
-            continue;
+        let previous = current_body(db, &id);
+        match crate::attachments::extract_inline_attachments(db, &mut doc, previous.as_ref()) {
+            Ok(()) => {}
+            Err(crate::attachments::AttachmentError::Invalid) => {
+                results.push(json!({"id": id, "error": "bad_request", "reason": "invalid attachment data"}));
+                continue;
+            }
+            Err(crate::attachments::AttachmentError::MissingStub(reason)) => {
+                results.push(json!({"id": id, "error": "missing_stub", "reason": reason}));
+                continue;
+            }
         }
 
         match write_doc(db, feed, &id, doc) {
@@ -554,7 +589,11 @@ fn bulk_docs_new_edits_false(db: &Db, feed: &ChangeFeed, docs: &[Value]) -> Resu
             continue;
         };
         if let Err(reason) = write_doc_new_edits_false(db, feed, &id, doc) {
-            let error = if reason == "failed to write document" { "internal_error" } else { "bad_request" };
+            let error = match reason {
+                "failed to write document" => "internal_error",
+                "missing_stub" => "missing_stub",
+                _ => "bad_request",
+            };
             errors.push(json!({"id": id, "error": error, "reason": reason}));
         }
     }
@@ -585,7 +624,10 @@ fn write_doc_new_edits_false(
         obj.remove("_revisions");
         obj.remove("_deleted");
     }
-    crate::attachments::extract_inline_attachments(db, &mut body).map_err(|_| "invalid attachment data")?;
+    crate::attachments::extract_inline_attachments(db, &mut body, None).map_err(|e| match e {
+        crate::attachments::AttachmentError::Invalid => "invalid attachment data",
+        crate::attachments::AttachmentError::MissingStub(_) => "missing_stub",
+    })?;
 
     db.update_tree(id, feed, |tree| tree.insert_revision_chain(&chain, deleted, body))
         .map(|_| rev)
@@ -714,7 +756,7 @@ async fn bulk_get(
                 // currently exist," a different question. Fixed after
                 // this exact mismatch broke real replication — see
                 // `doc/changelog.md`.
-                Some(node) => json!({"ok": revision_body(&tree, id, rev_id, node, revs)}),
+                Some(node) => json!({"ok": outgoing_body(&db, &tree, id, rev_id, node, revs)}),
                 None => json!({"error": {"id": id, "rev": rev_id, "error": "not_found", "reason": "missing"}}),
             }).collect())
         })()

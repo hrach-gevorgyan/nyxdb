@@ -152,6 +152,8 @@ pub struct Db {
     /// ever hold a small stub (`{"stub":true,"digest":...,"length":...}`)
     /// pointing here, not the raw bytes. See `crate::attachments`.
     pub attachments: sled::Tree,
+    /// md5 digest (`"md5-<base64>"`, what stubs expose) → content key.
+    attachment_index: sled::Tree,
 }
 
 impl Db {
@@ -164,6 +166,7 @@ impl Db {
             seq_log: base.open_tree(format!("{name}::seq"))?,
             seq_by_doc: base.open_tree(format!("{name}::seqidx"))?,
             attachments: base.open_tree(format!("{name}::attachments"))?,
+            attachment_index: base.open_tree(format!("{name}::attmd5"))?,
         };
         if db.seq_by_doc.is_empty() && !db.seq_log.is_empty() {
             db.migrate_seq_index()?;
@@ -200,18 +203,35 @@ impl Db {
         Ok(())
     }
 
-    pub fn get_attachment(&self, digest: &str) -> StorageResult<Option<Vec<u8>>> {
-        Ok(self.attachments.get(digest)?.map(|bytes| bytes.to_vec()))
+    /// Resolves a stub digest — `md5-…` (current) or `sha256-…` (stubs
+    /// written before v0.1.7, which were the content key itself).
+    fn attachment_key(&self, digest: &str) -> StorageResult<Option<sled::IVec>> {
+        if digest.starts_with("md5-") {
+            Ok(self.attachment_index.get(digest)?)
+        } else {
+            Ok(Some(sled::IVec::from(digest.as_bytes())))
+        }
     }
 
-    pub fn put_attachment(&self, digest: &str, bytes: &[u8]) -> StorageResult<()> {
-        // Content-addressed: if this exact content is already stored
-        // (same digest), skip the write entirely rather than overwrite
-        // with identical bytes.
-        if self.attachments.contains_key(digest)? {
-            return Ok(());
+    pub fn get_attachment(&self, digest: &str) -> StorageResult<Option<Vec<u8>>> {
+        let Some(key) = self.attachment_key(digest)? else { return Ok(None) };
+        Ok(self.attachments.get(key)?.map(|bytes| bytes.to_vec()))
+    }
+
+    pub fn has_attachment(&self, digest: &str) -> StorageResult<bool> {
+        let Some(key) = self.attachment_key(digest)? else { return Ok(false) };
+        Ok(self.attachments.contains_key(key)?)
+    }
+
+    /// Stores `bytes` under their content key and indexes their md5
+    /// digest. Content-addressed: identical bytes are only stored once.
+    /// The first content to claim an md5 keeps it (a deliberately crafted
+    /// md5 collision can't redirect an existing stub to other bytes).
+    pub fn put_attachment(&self, key: &str, md5: &str, bytes: &[u8]) -> StorageResult<()> {
+        if !self.attachments.contains_key(key)? {
+            self.attachments.insert(key, bytes)?;
         }
-        self.attachments.insert(digest, bytes)?;
+        let _ = self.attachment_index.compare_and_swap(md5, None as Option<&[u8]>, Some(key.as_bytes()))?;
         Ok(())
     }
 

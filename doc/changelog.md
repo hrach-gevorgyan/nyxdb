@@ -111,6 +111,29 @@ asked for `_changes?since=0`. The uuid is now generated once and stored
 with the data. Tests: `test/integration/checkpoint_resume.js` (spawns
 its own server) and `server_uuid_survives_a_restart` (storage).
 
+**7. Attachment digests didn't match PouchDB's, so every pull
+re-downloaded every attachment (medium).** Stubs carried `sha256-<hex>`
+digests. PouchDB's replicator (`fileHasChanged`) compares the server's
+digest with the `md5-<base64>` digest it computed for its own copy, so
+they never matched. Reproduced: pulling an edit that only changed the
+doc body still downloaded its attachment. Stubs now carry CouchDB-style
+`md5-<base64>` digests; bytes stay content-addressed by sha256
+internally, via an md5 → sha256 index. Stubs written by older versions
+still resolve and are shown as md5. Adds the `md-5` crate (RustCrypto,
+same family as the existing `sha2`).
+
+Also fixed here (from the LOW list, same code path): a stub whose digest
+the server doesn't have was stored anyway, leaving an attachment that
+could never be read — now `412 missing_stub` (per-doc `missing_stub` in
+`_bulk_docs`). And a plain `PUT` re-sending a bare `{"stub":true}` for an
+unchanged attachment stored a digest-less stub that made the attachment
+`GET` fail with a 500 — it now keeps the previous revision's attachment.
+
+Tests: md5 digests on every read path, "no re-download on an
+attachment-preserving edit" (real PouchDB pull, counting attachment
+GETs), missing stub → 412, bare stub kept — in
+`test/attachments/run.js`; legacy sha256 stub resolution as a unit test.
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a

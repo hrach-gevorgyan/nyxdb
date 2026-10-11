@@ -232,7 +232,131 @@ async function testConflictingBranchAttachments() {
   }
 }
 
+const md5Digest = (s) => "md5-" + require("node:crypto").createHash("md5").update(s).digest("base64");
+
+// Stubs must carry CouchDB-style `md5-<base64>` digests (see
+// doc/changelog.md, v0.1.7): that's what PouchDB computes for its own
+// copies, and what its replicator compares to decide whether it already
+// has an attachment.
+async function testMd5Digests() {
+  const db = "att_md5_" + Date.now();
+  await req(db, "PUT", "");
+  const json = { "Content-Type": "application/json" };
+  await req(
+    db,
+    "PUT",
+    "/doc",
+    JSON.stringify({ _attachments: { "f.txt": { content_type: "text/plain", data: Buffer.from("hello md5").toString("base64") } } }),
+    json
+  );
+  const want = md5Digest("hello md5");
+  const viaGet = (await req(db, "GET", "/doc")).body._attachments?.["f.txt"]?.digest;
+  const viaBulk = (await req(db, "POST", "/_bulk_get", JSON.stringify({ docs: [{ id: "doc" }] }), json)).body.results?.[0]
+    ?.docs?.[0]?.ok?._attachments?.["f.txt"]?.digest;
+  const viaOpenRevs = (await req(db, "GET", "/doc?open_revs=all")).body?.[0]?.ok?._attachments?.["f.txt"]?.digest;
+  check(
+    "attachment stubs carry CouchDB-style md5-<base64> digests on every read path",
+    viaGet === want && viaBulk === want && viaOpenRevs === want,
+    `want ${want}; GET=${viaGet} _bulk_get=${viaBulk} open_revs=${viaOpenRevs}`
+  );
+  await req(db, "DELETE", "");
+}
+
+// The practical effect: a pull of an edited doc whose attachment didn't
+// change must not download the attachment again.
+async function testPullSkipsUnchangedAttachment() {
+  const db = "att_redownload_" + Date.now();
+  await req(db, "PUT", "");
+  const json = { "Content-Type": "application/json" };
+  const created = await req(
+    db,
+    "PUT",
+    "/doc",
+    JSON.stringify({ v: 1, _attachments: { "big.bin": { content_type: "application/octet-stream", data: Buffer.alloc(4096, 7).toString("base64") } } }),
+    json
+  );
+
+  let attachmentGets = 0;
+  const remote = new PouchDB(`${SERVER_URL}/${db}`, {
+    auth: { username: OUR_USER, password: OUR_PASSWORD },
+    fetch: (url, opts) => {
+      if (new URL(url).pathname.endsWith("/doc/big.bin")) attachmentGets++;
+      return PouchDB.fetch(url, opts);
+    },
+  });
+  const local = new PouchDB("att_redownload_local_" + Date.now());
+  try {
+    await PouchDB.replicate(remote, local);
+    // Edit only the body; keep the attachment as the stub the server gave us.
+    const current = (await req(db, "GET", "/doc")).body;
+    await req(db, "PUT", "/doc", JSON.stringify({ ...current, _rev: created.body.rev, v: 2 }), json);
+    attachmentGets = 0;
+    await PouchDB.replicate(remote, local);
+    const pulled = await local.get("doc");
+    check(
+      "pulling an edit that didn't touch the attachment doesn't download it again",
+      pulled.v === 2 && attachmentGets === 0,
+      `v=${pulled.v}, attachment GETs on second pull: ${attachmentGets}`
+    );
+  } finally {
+    await local.destroy();
+    await req(db, "DELETE", "");
+  }
+}
+
+// A stub claims "the server already has these bytes". If it doesn't,
+// storing the stub anyway leaves a doc whose attachment can never be
+// read; CouchDB rejects it with 412 missing_stub.
+async function testMissingStub() {
+  const db = "att_stub_" + Date.now();
+  await req(db, "PUT", "");
+  const json = { "Content-Type": "application/json" };
+  const unknown = await req(
+    db,
+    "PUT",
+    "/doc?new_edits=false",
+    JSON.stringify({
+      _id: "doc",
+      _rev: "1-aaaa",
+      _attachments: { "x.txt": { stub: true, content_type: "text/plain", digest: md5Digest("never uploaded"), length: 14 } },
+    }),
+    json
+  );
+  check(
+    "a stub with a digest the server doesn't have is rejected 412 missing_stub",
+    unknown.status === 412 && unknown.body.error === "missing_stub",
+    `${unknown.status} ${JSON.stringify(unknown.body)}`
+  );
+
+  // A plain PUT may send a bare {stub:true} for an attachment it isn't
+  // changing; the server keeps the previous revision's attachment.
+  const first = await req(
+    db,
+    "PUT",
+    "/kept",
+    JSON.stringify({ _attachments: { "k.txt": { content_type: "text/plain", data: Buffer.from("keep me").toString("base64") } } }),
+    json
+  );
+  const second = await req(
+    db,
+    "PUT",
+    "/kept",
+    JSON.stringify({ _rev: first.body.rev, note: "edited", _attachments: { "k.txt": { stub: true } } }),
+    json
+  );
+  const bytes = await req(db, "GET", "/kept/k.txt");
+  check(
+    "a bare {stub:true} on PUT keeps the previous revision's attachment",
+    second.status === 200 && bytes.status === 200 && bytes.body === "keep me",
+    `PUT ${second.status} ${JSON.stringify(second.body)}; GET ${bytes.status} ${JSON.stringify(bytes.body)}`
+  );
+  await req(db, "DELETE", "");
+}
+
 async function main() {
+  await testMd5Digests();
+  await testPullSkipsUnchangedAttachment();
+  await testMissingStub();
   await testInlineAttachment();
   await testStandaloneUploadAndDelete();
   await testMalformedAttachmentRejected();

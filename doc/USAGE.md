@@ -203,12 +203,21 @@ other fields and other attachments are untouched).
 Attachment bytes are stored once per unique content (content-addressed
 by digest), even if referenced by multiple documents or revisions.
 
-*Difference from real CouchDB*: digests use SHA-256 (`"sha256-<hex>"`),
-not CouchDB's MD5 (`"md5-<base64>"`) — same reasoning as the revision
-hash difference above. Stubs also don't include `revpos` (the
-generation an attachment was added at) — cosmetic, doesn't affect sync.
-No `multipart/related` support — only inline JSON, which is what a
-PouchDB client sends by default.
+Stub digests are CouchDB's `"md5-<base64>"` form — the same digest
+PouchDB computes for its own copy, which is how its replicator knows it
+already has an attachment and skips downloading it (since v0.1.7;
+earlier versions exposed `sha256-` digests, so every pull re-downloaded
+every attachment — old stubs still work and are shown as md5).
+
+A stub is a claim that the server already has the bytes. A stub whose
+`digest` isn't stored is rejected with `412 {"error":"missing_stub"}`
+(per-doc `missing_stub` error inside `_bulk_docs`). On a plain `PUT`, a
+bare `{"stub":true}` with no digest keeps the previous revision's
+attachment of that name.
+
+Stubs don't include `revpos` (the generation an attachment was added
+at) — doesn't affect sync. No `multipart/related` support — only inline
+JSON, which is what a PouchDB client sends by default.
 
 ### `POST /{db}/_bulk_docs`
 Batch write. Two modes:
@@ -392,8 +401,8 @@ Reproduce with `test/benchmark/`, `test/load/` (scale via
 4. **`_changes` sequence tokens are plain integers**, not portable
    between servers.
 5. **No heartbeat on `feed=continuous`.**
-6. **Attachment digests use SHA-256, not CouchDB's MD5**; stubs don't
-   include `revpos`. No `multipart/related` support — inline JSON only.
+6. **Attachment stubs don't include `revpos`.** No `multipart/related`
+   support — inline JSON only.
 7. **No Mango, views, `_security`, `_session`, clustering, or
    server-triggered replication.**
 8. **Plaintext HTTP only** — fine on a trusted LAN, not for anything
