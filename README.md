@@ -72,7 +72,7 @@ every release.
 
 **Last tested: v0.1.5, 2026-07-27 17:56 UTC.**
 
-*Not re-run for v0.1.7 (no real CouchDB was available to compare against). v0.1.7 flushes every write to disk before acknowledging it, so expect lower write throughput than shown here, and caps the sled cache, so expect lower memory.*
+*These CouchDB numbers are from v0.1.5. v0.1.7 against v0.1.6 (median of 3, see [BENCHMARKS.md](doc/BENCHMARKS.md)): reads, `_changes`, bulk writes and memory about the same; single-doc writes ~1.2 ms instead of ~0.2 ms, because every write is now on disk before it is acknowledged.*
 
 | | NyxDB | Real CouchDB | Ratio |
 |---|---|---|---|

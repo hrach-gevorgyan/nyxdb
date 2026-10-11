@@ -1,4 +1,66 @@
-# Benchmarks vs Real CouchDB
+# Benchmarks
+
+## v0.1.7 vs v0.1.6 (2026-10-11)
+
+Same machine (i7-13650HX, Windows 11, NVMe), release builds, 5,000
+task-like docs, **median of 3 runs**, each run on a fresh server and
+data dir. Reproduce with `test/benchmark/compare.js`:
+
+```bash
+BENCH_NYXDB="v0.1.7=target/release/nyxdb.exe,v0.1.6=path/to/v0.1.6/nyxdb.exe" node test/benchmark/compare.js
+```
+
+| | v0.1.7 | v0.1.6 | |
+|---|---|---|---|
+| Bulk write, one `_bulk_docs` (docs/s) | 24,767 | 32,090 | 0.8× |
+| Single-doc `PUT`, sequential (ms/write) | 1.19 | 0.18 | 6.6× slower |
+| Concurrent `PUT`, 8 clients (writes/s) | 1,127 | 15,789 | 14× slower |
+| Single-doc `GET`, sequential (ms/read) | 0.15 | 0.13 | same |
+| Full `_changes`, 5,700 docs (ms) | 29.4 | 27.5 | same |
+| `_bulk_get` of 1,000 docs (ms) | 12.1 | 12.7 | same |
+| PouchDB pull of the whole db (s) | 0.50 | 0.37 | 1.4× slower |
+| Attachment upload, 20 × 512 KB (MB/s) | 117 | 193 | 0.6× |
+| Idle memory (MB) | 28.1 | 27.8 | same |
+| Memory after the workload (MB) | 56.2 | 52.2 | same |
+| Writing 100 MB in PouchDB-sized batches of 100: peak memory (MB) | 88 | 170 | half |
+| Disk after the workload (MB) | 3.00 | 2.91 | same |
+| Startup to first response (ms) | 67 | 68 | same |
+| Binary size (MB) | 5.98 | 4.44 | |
+
+**What it means.**
+
+- **Every acknowledged write is now on disk; that is the cost.**
+  v0.1.6 acknowledged writes that sled flushed up to ~500 ms later, so a
+  crash or a hard kill lost them (#3 in `changelog.md`). v0.1.7 writes
+  each doc's tree and `_changes` entry in one sled transaction and
+  flushes before answering. sled 0.34 pays ~0.5 ms per transaction at
+  that flush, and the cost doesn't overlap across concurrent clients, so
+  single-doc writes are now ~1.2 ms each, ~1,100/s in total. For a
+  personal or small-team sync server that is far above real load;
+  replication pushes are batches, which are not affected (next point).
+- **Batches are fine.** `_bulk_docs`, which every PouchDB push uses,
+  writes up to 128 docs per transaction. Benchmarking first found it 27×
+  slower than v0.1.6 (one transaction per doc); that was fixed before
+  release (see `changelog.md`).
+- **Reads are unchanged.**
+- **Memory is lower under real sync load** because the sled cache is now
+  capped (`NYXDB_CACHE_MB`, 32 MB).
+
+**Measurement note: Node's `fetch` hid the server.** On this machine
+Node's built-in `fetch` adds ~12 ms to every request on loopback
+(measured: the same `GET` takes 0.7 ms with curl, 0.44 ms with
+`node:http` keep-alive, 13 ms with `fetch`). `compare.js` therefore uses
+`node:http`. The older `vs_couchdb.js` read figures below (~10.7 ms per
+`GET` for both servers) were mostly that client overhead.
+
+If concurrent single-doc writes ever matter, the options are: coalesce
+concurrent writes to one database into one transaction (group commit),
+or a storage engine without sled's per-transaction flush cost. Neither
+is done.
+
+---
+
+# Benchmarks vs Real CouchDB (v0.1.5)
 
 One machine, one run each, this server's release build vs. a real local
 CouchDB 3.5.2. Not a rigorous statistical benchmark — no repeated
@@ -13,7 +75,7 @@ run. Per-release testing policy: benchmarks are re-run and this file
 updated after every version bump, not left stale from an earlier
 release — see `doc/changelog.md` for what changed in each version.
 
-*Not re-run for v0.1.7 (no real CouchDB was available to compare against). v0.1.7 flushes every write to disk before acknowledging it, so expect lower write throughput than shown here, and caps the sled cache, so expect lower memory.*
+*The CouchDB comparison below is from v0.1.5. For v0.1.7 against v0.1.6 on the same machine, see the first section.*
 
 ---
 

@@ -485,10 +485,10 @@ release (last tested: v0.1.4, 2026-07-27). Summary: ~52x smaller
 install, several times faster writes, comparable reads, ~3x lighter
 memory, and within ~5% of CouchDB's disk usage per document.
 
-Not re-run for v0.1.7: there was no real CouchDB to compare against. Expect
-writes to be somewhat slower than those numbers, since every write now
-waits for a flush to disk before it is acknowledged, and memory to be
-lower, since sled's cache is now capped (`NYXDB_CACHE_MB`).
+v0.1.7 against v0.1.6 is in BENCHMARKS.md's first section: reads,
+`_changes`, bulk writes and memory about the same; single-doc writes
+~1.2 ms instead of ~0.2 ms (every write is on disk before it is
+acknowledged).
 
 Reproduce with `test/benchmark/`, `test/load/` (scale via
 `LOAD_BULK_SIZE`/`LOAD_SUBSCRIBERS`).
