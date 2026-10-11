@@ -78,6 +78,9 @@ jobs:
       - name: Write semantics (_deleted, DELETE, _local revs)
         run: node test/write_semantics/run.js
 
+      - name: Read endpoints (_all_docs, _design, db info, _changes limit)
+        run: node test/read_surface/run.js
+
       - name: Databases are only created by PUT /{db}
         run: node test/databases/run.js
 

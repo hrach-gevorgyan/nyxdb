@@ -226,6 +226,24 @@ just-under and just-over a small limit on a self-spawned server).
 
 Test: `test/write_semantics/run.js` (all 9 checks fail before the fix).
 
+**LOW: read endpoints.**
+
+- `GET /{db}/_all_docs` (404 before): live docs in id order, tombstones
+  left out, with `include_docs`, inclusive JSON `startkey`/`endkey`,
+  `descending`, `skip`, `limit`, `total_rows`, `offset`. `POST` with
+  `{"keys": [...]}` answers in request order, `error: not_found` for
+  unknown ids and `value.deleted: true` for deleted ones.
+- `PUT /{db}/_design/app` was stored as id `_design` (the `/` split the
+  path). `/{db}/_design/{name}` now has GET/PUT/DELETE on id
+  `_design/{name}`. Design docs are stored only; NyxDB runs no views.
+- `GET /{db}` counted tombstones in `doc_count`. Now `doc_count` is live
+  docs, plus `doc_del_count`, `update_seq` and `instance_start_time`.
+- `_changes?limit=N` was ignored. It now returns at most N rows, and
+  `last_seq` is the last returned row's seq, so the next page resumes
+  there.
+
+Test: `test/read_surface/run.js` (all 7 checks fail before the fix).
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a

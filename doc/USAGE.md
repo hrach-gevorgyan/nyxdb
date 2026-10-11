@@ -120,13 +120,30 @@ curl -u user:pass -X DELETE http://127.0.0.1:5984/mydb
 ```
 
 ### `GET /{db}`
-Database metadata. Only `db_name` and `doc_count` — real CouchDB
-returns more (`update_seq`, `disk_size`, etc.), we don't need it.
+Database metadata: `db_name`, `doc_count` (live docs only),
+`doc_del_count` (tombstones), `update_seq` and `instance_start_time`
+(always `"0"`, as in CouchDB 2+). No `disk_size`/`sizes`.
 
 ```bash
 curl -u user:pass http://127.0.0.1:5984/mydb
-# {"db_name":"mydb","doc_count":0}
+# {"db_name":"mydb","doc_count":0,"doc_del_count":0,"update_seq":0,"instance_start_time":"0"}
 ```
+
+### `GET /{db}/_all_docs`, `POST /{db}/_all_docs`
+Live docs in id order (tombstones left out). Query options:
+`include_docs`, `startkey`/`endkey` (JSON strings, inclusive),
+`descending`, `skip`, `limit`. Response: `total_rows`, `offset`, `rows`
+of `{id, key, value: {rev}}`. `POST` with `{"keys": [...]}` returns one
+row per key in request order — `{"key", "error": "not_found"}` for an
+unknown id, `value.deleted: true` for a deleted one.
+
+```bash
+curl -u user:pass "http://127.0.0.1:5984/mydb/_all_docs?include_docs=true&limit=10"
+```
+
+### `/{db}/_design/{name}`
+GET/PUT/DELETE design docs (id `_design/{name}`). They are stored and
+replicated like any doc; NyxDB doesn't run views.
 
 ### `GET /{db}/{id}`
 Fetch a document. Add `?conflicts=true` to include a `_conflicts` array
@@ -396,6 +413,8 @@ The "what changed" feed. Query params:
 - `feed=longpoll` — waits for a change (or `timeout` ms, default 60000)
   then responds. This is what PouchDB's `live:true` sync uses.
 - `feed=continuous` — streams newline-delimited JSON as changes happen.
+- `limit=N` — at most N rows (normal and longpoll); `last_seq` is then
+  the last returned row's seq, so `since=<last_seq>` gets the next page.
 - `heartbeat=<ms>` (or `true` for 60000) — while waiting, write a
   newline every `heartbeat` ms so the client and any proxy keep the
   connection open. On longpoll, as in CouchDB, a heartbeat overrides

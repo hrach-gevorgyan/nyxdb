@@ -15,6 +15,8 @@
 - `write_semantics/` — `_deleted`, `DELETE` (incl. PouchDB resolving a
   conflict on a remote), writes onto a losing leaf, `_local` revisions.
   Uses `test/integration`'s PouchDB install.
+- `read_surface/` — `_all_docs` (GET and POST `keys`), `_design/...` ids,
+  `GET /{db}` metadata, `_changes?limit=`.
 - `durability/` — spawns its own server, hard-kills it right after
   acknowledged writes, restarts it; every acknowledged write must
   survive. Needs the release binary (or `NYXDB_BIN`).
@@ -63,6 +65,9 @@ node test/databases/run.js
 
 # Write semantics
 node test/write_semantics/run.js
+
+# Read endpoints
+node test/read_surface/run.js
 
 # Hard-kill durability (spawns its own server on port 8299)
 node test/durability/run.js

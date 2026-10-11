@@ -235,6 +235,15 @@ impl Db {
         Ok(())
     }
 
+    /// Every stored doc id (tombstones included), in byte order.
+    pub fn doc_ids(&self) -> StorageResult<Vec<String>> {
+        self.docs
+            .iter()
+            .keys()
+            .map(|key| Ok(String::from_utf8_lossy(&key?).into_owned()))
+            .collect()
+    }
+
     pub fn get_tree(&self, doc_id: &str) -> StorageResult<Option<RevTree>> {
         let Some(bytes) = self.docs.get(doc_id)? else { return Ok(None) };
         let stored: StoredTree = bincode_options()

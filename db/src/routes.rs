@@ -84,6 +84,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/:db", put(create_db).get(db_info).delete(delete_db))
         .route("/:db/:id", get(get_doc).put(put_doc).delete(delete_doc))
         .route("/:db/:id/:attname", get(get_attachment).put(put_attachment).delete(delete_attachment))
+        .route("/:db/_design/:name", get(get_design).put(put_design).delete(delete_design))
+        .route("/:db/_all_docs", get(all_docs).post(all_docs_keys))
         .route("/:db/_bulk_docs", post(bulk_docs))
         .route("/:db/_revs_diff", post(revs_diff))
         .route("/:db/_bulk_get", post(bulk_get))
@@ -183,9 +185,163 @@ async fn db_info(
 ) -> Result<Json<Value>, ApiError> {
     blocking(|| {
         let db = state.db(&db_name)?;
-        let doc_count = db.docs.len();
-        Ok(Json(json!({"db_name": db_name, "doc_count": doc_count})))
+        // CouchDB's `doc_count` is live docs only; tombstones are counted
+        // separately. This scans every tree — fine at this server's scale.
+        let (mut live, mut deleted) = (0u64, 0u64);
+        for id in db.doc_ids().map_err(|_| internal_error())? {
+            match winner_state(&db, &id)? {
+                Some((_, false)) => live += 1,
+                Some((_, true)) => deleted += 1,
+                None => {}
+            }
+        }
+        let update_seq = db.current_seq().map_err(|_| internal_error())?;
+        Ok(Json(json!({
+            "db_name": db_name,
+            "doc_count": live,
+            "doc_del_count": deleted,
+            "update_seq": update_seq,
+            "instance_start_time": "0",
+        })))
     })
+}
+
+/// A doc's winning rev and whether it is a tombstone.
+fn winner_state(db: &Db, id: &str) -> Result<Option<(String, bool)>, ApiError> {
+    let Some(tree) = db.get_tree(id).map_err(|_| internal_error())? else { return Ok(None) };
+    Ok(tree.winner().map(|rev| (rev.to_string(), tree.nodes[rev].deleted)))
+}
+
+#[derive(serde::Deserialize)]
+struct AllDocsParams {
+    #[serde(default)]
+    include_docs: bool,
+    #[serde(default)]
+    descending: bool,
+    limit: Option<usize>,
+    #[serde(default)]
+    skip: usize,
+    /// JSON-encoded, like CouchDB (`startkey="a"`); `start_key`/`end_key` too.
+    #[serde(alias = "start_key")]
+    startkey: Option<String>,
+    #[serde(alias = "end_key")]
+    endkey: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct AllDocsKeys {
+    keys: Vec<String>,
+}
+
+fn json_key(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    raw.map(|raw| {
+        serde_json::from_str::<String>(raw)
+            .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "bad_request", "startkey/endkey must be JSON strings"))
+    })
+    .transpose()
+}
+
+fn all_docs_row(db: &Db, id: &str, rev: &str, include_docs: bool) -> Result<Value, ApiError> {
+    let mut row = json!({"id": id, "key": id, "value": {"rev": rev}});
+    if include_docs {
+        let tree = db.get_tree(id).map_err(|_| internal_error())?.ok_or_else(not_found)?;
+        let (rev, node) = resolve_rev(&tree, None)?;
+        row["doc"] = outgoing_body(db, &tree, id, rev, node, false);
+    }
+    Ok(row)
+}
+
+/// `GET /{db}/_all_docs` — live docs in id order (tombstones left out),
+/// with CouchDB's inclusive `startkey`/`endkey`, `descending`, `skip`,
+/// `limit` and `include_docs`.
+async fn all_docs(
+    State(state): State<AppState>,
+    Path(db_name): Path<String>,
+    Query(params): Query<AllDocsParams>,
+) -> Result<Json<Value>, ApiError> {
+    blocking(|| {
+        let db = state.db(&db_name)?;
+        let (start, end) = (json_key(params.startkey.as_deref())?, json_key(params.endkey.as_deref())?);
+        let mut live = Vec::new();
+        for id in db.doc_ids().map_err(|_| internal_error())? {
+            if let Some((rev, false)) = winner_state(&db, &id)? {
+                live.push((id, rev));
+            }
+        }
+        let total_rows = live.len();
+        if params.descending {
+            live.reverse();
+        }
+        // With `descending`, startkey is the high end and endkey the low.
+        let in_range = |id: &str| {
+            let (lo, hi) = if params.descending { (&end, &start) } else { (&start, &end) };
+            lo.as_deref().is_none_or(|lo| id >= lo) && hi.as_deref().is_none_or(|hi| id <= hi)
+        };
+        let rows = live
+            .iter()
+            .filter(|(id, _)| in_range(id))
+            .skip(params.skip)
+            .take(params.limit.unwrap_or(usize::MAX))
+            .map(|(id, rev)| all_docs_row(&db, id, rev, params.include_docs))
+            .collect::<Result<Vec<_>, _>>()?;
+        let offset = live.iter().take_while(|(id, _)| !in_range(id)).count() + params.skip;
+        Ok(Json(json!({"total_rows": total_rows, "offset": offset, "rows": rows})))
+    })
+}
+
+/// `POST /{db}/_all_docs` with `{"keys": [...]}` — one row per key, in
+/// request order: unknown ids get `error: not_found`, deleted ones
+/// `value.deleted: true`.
+async fn all_docs_keys(
+    State(state): State<AppState>,
+    Path(db_name): Path<String>,
+    Query(params): Query<AllDocsParams>,
+    Json(body): Json<AllDocsKeys>,
+) -> Result<Json<Value>, ApiError> {
+    blocking(|| {
+        let db = state.db(&db_name)?;
+        let mut rows = Vec::with_capacity(body.keys.len());
+        for id in &body.keys {
+            rows.push(match winner_state(&db, id)? {
+                None => json!({"key": id, "error": "not_found"}),
+                Some((rev, true)) => json!({"id": id, "key": id, "value": {"rev": rev, "deleted": true}, "doc": null}),
+                Some((rev, false)) => all_docs_row(&db, id, &rev, params.include_docs)?,
+            });
+        }
+        let total_rows = db.doc_ids().map_err(|_| internal_error())?.len();
+        Ok(Json(json!({"total_rows": total_rows, "offset": 0, "rows": rows})))
+    })
+}
+
+/// `/{db}/_design/{name}`: design docs are ordinary docs whose id holds a
+/// `/`, which the `/:db/:id` route can't capture.
+fn design_id(db_name: String, name: String) -> Path<(String, String)> {
+    Path((db_name, format!("_design/{name}")))
+}
+
+async fn get_design(
+    state: State<AppState>,
+    Path((db_name, name)): Path<(String, String)>,
+    params: Query<GetDocParams>,
+) -> Result<Json<Value>, ApiError> {
+    get_doc(state, design_id(db_name, name), params).await
+}
+
+async fn put_design(
+    state: State<AppState>,
+    Path((db_name, name)): Path<(String, String)>,
+    params: Query<PutDocParams>,
+    body: Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    put_doc(state, design_id(db_name, name), params, body).await
+}
+
+async fn delete_design(
+    state: State<AppState>,
+    Path((db_name, name)): Path<(String, String)>,
+    params: Query<DeleteDocParams>,
+) -> Result<Json<Value>, ApiError> {
+    delete_doc(state, design_id(db_name, name), params).await
 }
 
 /// `DELETE /{db}` — not part of the replication protocol proper (a
@@ -982,6 +1138,8 @@ struct ChangesParams {
     timeout: Option<u64>,
     /// Milliseconds, or `true` for CouchDB's default of 60 s.
     heartbeat: Option<String>,
+    /// At most this many rows; `last_seq` is then the last returned row's seq.
+    limit: Option<usize>,
 }
 
 /// `heartbeat` as a duration: a number of ms, or `true` for 60 s (CouchDB's
@@ -1012,8 +1170,8 @@ async fn changes(
     let heartbeat = heartbeat_of(&params);
     match params.feed.as_deref() {
         Some("continuous") => blocking(|| changes_continuous(state, db_name, db, since, style_all_docs, heartbeat)),
-        Some("longpoll") => changes_longpoll(state, db_name, db, since, style_all_docs, params.timeout, heartbeat).await,
-        _ => blocking(|| changes_normal(&db, since, style_all_docs)),
+        Some("longpoll") => changes_longpoll(state.feeds.get_or_create(&db_name), db, since, style_all_docs, params.limit, params.timeout, heartbeat).await,
+        _ => blocking(|| changes_normal(&db, since, style_all_docs, params.limit)),
     }
 }
 
@@ -1046,38 +1204,43 @@ fn build_change_row(db: &Db, seq: u64, doc_id: &str, style_all_docs: bool) -> Op
     Some(row)
 }
 
-fn changes_normal(db: &Db, since: u64, style_all_docs: bool) -> Result<Response, ApiError> {
-    Ok(Json(changes_body(db, since, style_all_docs)?).into_response())
+fn changes_normal(db: &Db, since: u64, style_all_docs: bool, limit: Option<usize>) -> Result<Response, ApiError> {
+    Ok(Json(changes_body(db, since, style_all_docs, limit)?).into_response())
 }
 
-fn changes_body(db: &Db, since: u64, style_all_docs: bool) -> Result<Value, ApiError> {
+fn changes_body(db: &Db, since: u64, style_all_docs: bool, limit: Option<usize>) -> Result<Value, ApiError> {
     let entries = db.changes_since(since).map_err(|_| internal_error())?;
     // `last_seq` is the highest seq this scan actually covered (or
     // `since` if it found nothing) — never the db's current seq read
     // afterwards. A write landing between the scan and that read would
     // otherwise sit below the client's new checkpoint without ever having
     // been returned, and be skipped forever (see doc/changelog.md, v0.1.7).
-    let last_seq = entries.iter().map(|(seq, _)| *seq).max().unwrap_or(since);
+    let mut last_seq = entries.iter().map(|(seq, _)| *seq).max().unwrap_or(since);
     let results: Vec<Value> = dedupe_latest(entries)
         .iter()
         .filter_map(|(seq, id)| build_change_row(db, *seq, id, style_all_docs))
+        .take(limit.unwrap_or(usize::MAX))
         .collect();
+    // With a `limit` that cut the feed short, the checkpoint must stop at
+    // the last row actually returned so the next page resumes from there.
+    if let Some(last) = results.last().filter(|_| limit.is_some_and(|n| n <= results.len())) {
+        last_seq = last["seq"].as_u64().unwrap_or(last_seq);
+    }
     Ok(json!({"results": results, "last_seq": last_seq}))
 }
 
 async fn changes_longpoll(
-    state: AppState,
-    db_name: String,
+    feed: ChangeFeed,
     db: Db,
     since: u64,
     style_all_docs: bool,
+    limit: Option<usize>,
     timeout_ms: Option<u64>,
     heartbeat: Option<Duration>,
 ) -> Result<Response, ApiError> {
-    let feed = state.feeds.get_or_create(&db_name);
     let Some(heartbeat) = heartbeat else {
         wait_for_change(&db, &feed, since, Duration::from_millis(timeout_ms.unwrap_or(60_000)), || {}).await;
-        return blocking(|| changes_normal(&db, since, style_all_docs));
+        return blocking(|| changes_normal(&db, since, style_all_docs, limit));
     };
     // With a heartbeat, CouchDB waits as long as it takes (the heartbeat
     // overrides `timeout`) and writes a newline every `heartbeat` so the
@@ -1087,7 +1250,7 @@ async fn changes_longpoll(
     let stream = futures::stream::unfold(Some((db, feed)), move |state| async move {
         let (db, feed) = state?;
         let line = if wait_for_change(&db, &feed, since, heartbeat, || {}).await {
-            match blocking(|| changes_body(&db, since, style_all_docs)) {
+            match blocking(|| changes_body(&db, since, style_all_docs, limit)) {
                 Ok(body) => return Some((Ok::<_, std::io::Error>(Bytes::from(body.to_string())), None)),
                 Err(_) => return None,
             }
