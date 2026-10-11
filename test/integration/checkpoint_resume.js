@@ -104,10 +104,7 @@ async function main() {
     );
   } finally {
     await stopServer(server);
-    // LevelDB can still hold its LOG file for a moment after replication
-    // settles on Windows; close, then remove the directory with retries.
     await local.close().catch(() => {});
-    fs.rmSync(localName, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 

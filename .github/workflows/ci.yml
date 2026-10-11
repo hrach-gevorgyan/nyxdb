@@ -119,9 +119,7 @@ jobs:
         run: node test/ported/pouchdb_tests.js
 
       - name: Attachment tests
-        run: |
-          npm install --prefix test/attachments
-          node test/attachments/run.js
+        run: node test/attachments/run.js
 
       - name: Load/soak test
         run: node test/load/run.js
