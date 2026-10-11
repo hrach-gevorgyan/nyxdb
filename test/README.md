@@ -20,6 +20,9 @@
 - `durability/` — spawns its own server, hard-kills it right after
   acknowledged writes, restarts it; every acknowledged write must
   survive. Needs the release binary (or `NYXDB_BIN`).
+- `ops/` — spawns its own server (port 8292) with tiny limits: request
+  timeout, concurrency limit, `_changes` exempt from both, request
+  tracing, CORS preflight `max-age`. Needs the release binary.
 - `changes_follow/` — polling and continuous `_changes` followers
   while many writers run; neither may miss a change.
 - `feeds/` — `_changes` longpoll/continuous `heartbeat` and `timeout`
@@ -71,6 +74,9 @@ node test/read_surface/run.js
 
 # Hard-kill durability (spawns its own server on port 8299)
 node test/durability/run.js
+
+# Request limits, tracing, CORS max-age (spawns its own server on port 8292)
+node test/ops/run.js
 
 # _changes followers under concurrent writes
 node test/changes_follow/run.js

@@ -51,6 +51,9 @@ curl -u admin:<password> -X PUT http://127.0.0.1:5984/mydb     # needs auth
 | `NYXDB_CACHE_MB` | `32` | sled page-cache size; real memory is roughly 25 MB + 2× this (see below) |
 | `NYXDB_COMPRESSION_LEVEL` | sled's default (5) | zstd level, 1–22 |
 | `NYXDB_MAX_BODY_BYTES` | `268435456` (256 MB) | largest accepted request body; larger gets `413 {"error":"too_large"}` |
+| `NYXDB_REQUEST_TIMEOUT_SECS` | `300` | a request (including reading its body) that takes longer gets `408 {"error":"request_timeout"}`; `0` = no limit. `_changes` is exempt |
+| `NYXDB_MAX_CONCURRENT_REQUESTS` | `512` | requests in progress at once; more wait for a slot. `_changes` is exempt. This caps requests, not open connections |
+| `RUST_LOG` | `info` | log filter; `info,tower_http=debug` logs every request and its status and latency |
 
 Source: `db/src/main.rs`, `db/src/auth.rs`.
 

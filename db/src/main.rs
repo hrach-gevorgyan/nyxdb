@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::normalize_path::NormalizePathLayer;
+use tower_http::trace::TraceLayer;
 
 /// CORS per plan §7: "only enable it as broadly as your actual client
 /// needs" — `origins=*` is convenient but a real widening of attack
@@ -36,8 +37,50 @@ fn cors_layer() -> Option<CorsLayer> {
                 axum::http::Method::HEAD,
             ])
             .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION])
-            .allow_credentials(true),
+            .allow_credentials(true)
+            // Browsers re-send a preflight before every cross-origin write
+            // unless told they may cache it.
+            .max_age(std::time::Duration::from_secs(3600)),
     )
+}
+
+/// Per-request limits: at most `slots` requests in progress (more wait for
+/// a slot), and each answered 408 if it takes longer than `timeout` —
+/// including reading its body, so a stalled upload can't hold memory and
+/// a slot forever. `_changes` is exempt from both: a longpoll legitimately
+/// waits (its own `timeout`, default 60 s) and continuous feeds never end.
+#[derive(Clone)]
+struct Limits {
+    timeout: Option<std::time::Duration>,
+    slots: Arc<tokio::sync::Semaphore>,
+}
+
+async fn limit_requests(
+    axum::extract::State(limits): axum::extract::State<Limits>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if request.uri().path().ends_with("/_changes") {
+        return next.run(request).await;
+    }
+    let _slot = limits.slots.acquire().await;
+    let Some(timeout) = limits.timeout else { return next.run(request).await };
+    match tokio::time::timeout(timeout, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => (
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            axum::Json(serde_json::json!({"error": "request_timeout", "reason": "request took longer than NYXDB_REQUEST_TIMEOUT_SECS"})),
+        )
+            .into_response(),
+    }
+}
+
+fn env_number(name: &str, default: u64) -> u64 {
+    match std::env::var(name) {
+        Err(_) => default,
+        Ok(v) => v.parse().unwrap_or_else(|_| fail(EXIT_CONFIG, &format!("{name} must be a whole number, got {v:?}"))),
+    }
 }
 
 /// Startup exit codes, so whatever launches NyxDB (Offlog runs it as a
@@ -57,7 +100,11 @@ fn fail(code: i32, message: &str) -> ! {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    // `RUST_LOG` picks what is logged (default `info`); per-request lines
+    // come from `tower_http` at debug: `RUST_LOG=info,tower_http=debug`.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let data_dir = std::env::var("NYXDB_DATA").unwrap_or_else(|_| "./data".into());
     // zstd compression is off by default in sled; JSON document bodies
@@ -125,7 +172,7 @@ async fn main() {
             .unwrap_or_else(|_| fail(EXIT_CONFIG, &format!("NYXDB_MAX_BODY_BYTES must be a number of bytes, got {v:?}"))),
     };
 
-    let mut app = build_router(AppState {
+    let app = build_router(AppState {
         root,
         feeds: ChangeFeedRegistry::default(),
         creds: Arc::new(creds),
@@ -133,6 +180,19 @@ async fn main() {
         locks: nyxdb::storage::WriteLocks::default(),
     })
         .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes));
+    // Generous defaults: 300 s fits a 256 MB upload at under 1 MB/s, and
+    // 512 requests in progress is far beyond what a few syncing devices
+    // need. 0 turns the timeout off.
+    let timeout_secs = env_number("NYXDB_REQUEST_TIMEOUT_SECS", 300);
+    let slots = env_number("NYXDB_MAX_CONCURRENT_REQUESTS", 512);
+    if slots == 0 {
+        fail(EXIT_CONFIG, "NYXDB_MAX_CONCURRENT_REQUESTS must be at least 1");
+    }
+    let limits = Limits {
+        timeout: (timeout_secs > 0).then(|| std::time::Duration::from_secs(timeout_secs)),
+        slots: Arc::new(tokio::sync::Semaphore::new(slots as usize)),
+    };
+    let mut app = app.layer(axum::middleware::from_fn_with_state(limits, limit_requests)).layer(TraceLayer::new_for_http());
     // CORS must wrap auth (outermost), not the other way round: tower_http's
     // CorsLayer answers OPTIONS preflight requests itself, and a preflight
     // never carries credentials — if auth ran first, every preflight would

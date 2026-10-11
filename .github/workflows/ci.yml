@@ -87,6 +87,9 @@ jobs:
       - name: Acknowledged writes survive a hard kill
         run: node test/durability/run.js
 
+      - name: Request timeout, concurrency limit, tracing, CORS max-age
+        run: node test/ops/run.js
+
       - name: longpoll/continuous heartbeat and timeout
         run: node test/feeds/run.js
 

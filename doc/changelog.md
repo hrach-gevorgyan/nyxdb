@@ -261,6 +261,24 @@ Test: `test/read_surface/run.js` (all 7 checks fail before the fix).
   `test/attachments/run.js` (replaced bytes gone, current and
   conflict-branch bytes kept).
 
+**LOW: operational limits.**
+
+- No request timeout: a client that stalled mid-upload held its buffer
+  and a task forever. `NYXDB_REQUEST_TIMEOUT_SECS` (default 300, `0` =
+  off) answers `408 request_timeout`, counting the body read.
+- No limit on concurrent work. `NYXDB_MAX_CONCURRENT_REQUESTS` (default
+  512) caps requests in progress; more wait for a slot. axum 0.7's
+  `serve` can't cap raw connections, so idle connections aren't limited.
+- `_changes` is exempt from both: longpoll waits by design (its own
+  `timeout`), continuous feeds never end, and neither should take a slot.
+- No request logging. `TraceLayer` added, and `RUST_LOG` now works
+  (default `info`; `info,tower_http=debug` logs each request).
+- CORS preflights had no `max-age`, so a browser client re-sent one
+  before every write. Now cached for an hour.
+
+Test: `test/ops/run.js` (own server, tiny limits; each part
+break-tested separately).
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a
