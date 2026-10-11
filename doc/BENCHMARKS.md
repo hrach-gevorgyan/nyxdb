@@ -13,6 +13,8 @@ run. Per-release testing policy: benchmarks are re-run and this file
 updated after every version bump, not left stale from an earlier
 release — see `doc/changelog.md` for what changed in each version.
 
+*Not re-run for v0.1.7 (no real CouchDB was available to compare against). v0.1.7 flushes every write to disk before acknowledging it, so expect lower write throughput than shown here, and caps the sled cache, so expect lower memory.*
+
 ---
 
 ## Install size

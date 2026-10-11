@@ -72,6 +72,8 @@ every release.
 
 **Last tested: v0.1.5, 2026-07-27 17:56 UTC.**
 
+*Not re-run for v0.1.7 (no real CouchDB was available to compare against). v0.1.7 flushes every write to disk before acknowledging it, so expect lower write throughput than shown here, and caps the sled cache, so expect lower memory.*
+
 | | NyxDB | Real CouchDB | Ratio |
 |---|---|---|---|
 | Install size | 4.39 MB | 229 MB | **~52x smaller** |
@@ -102,11 +104,13 @@ see that file for what the gap actually costs at real-world scale
 | `_bulk_docs`, `_bulk_get`, `_revs_diff` | ✅ Supported |
 | Revision history on reads (`revs`, `revs_info`, `open_revs`, `latest`) | ✅ Supported |
 | Attachments (inline base64 + standalone endpoints) | ✅ Supported |
+| `_all_docs`, `_design/…` docs (stored, not run), `DELETE` docs | ✅ Supported |
+| Attachment compaction (`POST /{db}/_compact`) | ✅ Supported |
 | HTTP Basic auth | ✅ Supported |
 | `multipart/related` attachment uploads | ❌ Not planned |
 | Mango (`_find`), MapReduce views | ❌ Not planned |
 | `_session` cookie auth | ❌ Not planned |
-| Clustering, compaction | ❌ Not planned |
+| Clustering | ❌ Not planned |
 
 Full endpoint-by-endpoint reference and exact differences from real
 CouchDB: **[doc/USAGE.md](doc/USAGE.md)**.

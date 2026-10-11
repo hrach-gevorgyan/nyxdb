@@ -5,7 +5,7 @@
 > `COUCHDB_CLONE_*` env var prefix (now `NYXDB_*`) — left as an honest
 > historical record rather than rewritten.
 
-## v0.1.7 (unreleased)
+## v0.1.7
 
 Fixes from a read-only review of v0.1.6, in its priority order. Each
 fix was written test-first: the new test failed before the fix and

@@ -456,9 +456,14 @@ see `roadmap.md`.
 
 | Method | Checks | Where |
 |---|---|---|
-| Unit tests (24) | Winner-picking, conflicts, deletion/recreation, `_revs_diff`, ancestry walk, first-write `_changes` visibility | `db/src/revtree.rs`, `db/src/storage.rs` |
-| Real PouchDB client | One-shot and `live:true` two-device sync; edits to an already-synced doc stay conflict-free | `test/integration/` |
-| Revision history | `_bulk_get` `revs`/`latest`; `GET` `revs`/`revs_info`/`open_revs` | `test/revisions/` |
+| Unit tests (34) | Winner-picking, conflicts, deletion/recreation, `_revs_diff`, ancestry walk, pruning/stemming, first-write `_changes` visibility, seq-index migration, persisted server id, longpoll race, unreadable docs in `_changes`, attachment compaction, legacy digests | `db/src/*.rs` |
+| Real PouchDB client, on 8.0.1 and 9.x | One-shot and `live:true` two-device sync; edits and deletions of already-synced docs stay conflict-free; batches over 100 docs and near the body limit; checkpoint resume across a restart | `test/integration/` (`POUCHDB=9` for 9.x) |
+| Revision history | `_bulk_get` `revs`/`latest`; `GET` `revs`/`revs_info`/`open_revs`/`rev`; long histories stay bounded | `test/revisions/` |
+| Concurrency | Concurrent writers to one doc keep every branch; `_changes` followers miss nothing under many writers | `test/concurrency/`, `test/changes_follow/` |
+| Durability | Every acknowledged write survives a hard kill | `test/durability/` |
+| Feeds | longpoll/continuous `heartbeat` and `timeout` | `test/feeds/` |
+| HTTP surface | Database creation and names; `_deleted`, `DELETE`, `_local` revs; `_all_docs`, `_design/…`, db info, `_changes?limit` | `test/databases/`, `test/write_semantics/`, `test/read_surface/` |
+| Operations | Clean startup failures; bounded memory; no stalls under heavy scans; request timeout, concurrency limit, tracing, CORS max-age | `test/startup/`, `test/memory/`, `test/blocking/`, `test/ops/` |
 | Differential vs. real CouchDB | Winner rev, `_conflicts`, `_changes`, `_revs_diff` diffed against a live CouchDB | `test/differential/` |
 | Load/soak | Large batch writes + many concurrent `feed=continuous` subscribers | `test/load/` |
 | Ported PouchDB test cases | Real edge cases from PouchDB's own test suite | `test/ported/` |
@@ -480,6 +485,11 @@ release (last tested: v0.1.4, 2026-07-27). Summary: ~52x smaller
 install, several times faster writes, comparable reads, ~3x lighter
 memory, and within ~5% of CouchDB's disk usage per document.
 
+Not re-run for v0.1.7: there was no real CouchDB to compare against. Expect
+writes to be somewhat slower than those numbers, since every write now
+waits for a flush to disk before it is acknowledged, and memory to be
+lower, since sled's cache is now capped (`NYXDB_CACHE_MB`).
+
 Reproduce with `test/benchmark/`, `test/load/` (scale via
 `LOAD_BULK_SIZE`/`LOAD_SUBSCRIBERS`).
 
@@ -496,7 +506,11 @@ Reproduce with `test/benchmark/`, `test/load/` (scale via
 5. **Attachment stubs don't include `revpos`.** No `multipart/related`
    support — inline JSON only.
 6. **No Mango, views, `_security`, `_session`, clustering, or
-   server-triggered replication.**
-7. **Plaintext HTTP only** — fine on a trusted LAN, not for anything
+   server-triggered replication.** Design docs are stored and
+   replicated, but nothing runs them.
+7. **`POST /{db}/_compact` runs before it answers** and only collects
+   attachment bytes (old revision bodies are already dropped on write).
+   `GET /{db}` has no `sizes`/`disk_size`.
+8. **Plaintext HTTP only** — fine on a trusted LAN, not for anything
    internet-reachable.
-8. **Single-node only** — sled is embedded, no clustering.
+9. **Single-node only** — sled is embedded, no clustering.
