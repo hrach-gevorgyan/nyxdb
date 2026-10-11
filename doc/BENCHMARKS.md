@@ -37,6 +37,27 @@ Run-to-run spread on this laptop is roughly ±20%; treat ratios under
 Writing 100 MB in PouchDB-sized batches of 100 peaks at 88 MB for
 v0.1.7 and 170 MB for v0.1.6 (separate run).
 
+### Same run with v0.1.5 instead of v0.1.6
+
+Separate run, same method (median of 3), so CouchDB and v0.1.7 differ
+slightly from the table above — that's the run-to-run spread.
+
+| | v0.1.7 | v0.1.5 | CouchDB 3.5.2 |
+|---|---|---|---|
+| Bulk write, one `_bulk_docs` (docs/s) | 23,975 | 29,960 | 3,407 |
+| Single-doc `PUT`, sequential (ms/write) | 1.21 | 0.25 | 8.56 |
+| Concurrent `PUT`, 8 clients (writes/s) | 1,145 | 10,593 | 525 |
+| Single-doc `GET`, sequential (ms/read) | 0.14 | 0.13 | 3.29 |
+| Full `_changes`, 5,700 docs (ms) | 31.0 | 31.5 | 1,143 |
+| `_bulk_get` of 1,000 docs (ms) | 16.4 | 10.9 | 158 |
+| PouchDB pull of the whole db (s) | 0.56 | 0.38 | 2.45 |
+| Attachment upload, 20 × 512 KB (MB/s) | 100 | 195 | 15.4 |
+| Idle memory (MB) | 28.1 | 27.7 | 153 |
+| Memory after the workload (MB) | 57.5 | 51.4 | 154 |
+| Disk after the workload (MB) | 3.00 | 2.90 | 13.0 |
+| Startup to first response (ms) | 67 | 74 | — |
+| Binary size (MB) | 5.98 | 4.39 | ~229 install |
+
 **What it means.**
 
 - **Every acknowledged write is now on disk; that is the cost.**
