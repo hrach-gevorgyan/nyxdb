@@ -131,11 +131,12 @@ curl -u user:pass -G "http://127.0.0.1:5984/mydb/doc1" \
 (tombstones included, with `_deleted:true`); `404 {"reason":"missing"}`
 if it isn't stored.
 
-Known gap: ancestors that arrived only as part of a pushed `_revisions`
-chain (never as a document body) are stored as empty placeholders, so
-`revs_info` reports them `available` and `open_revs` returns them with
-an empty body. Real CouchDB would call those `missing`. Replication
-doesn't read ancestor bodies, so this doesn't affect sync.
+Only leaf revisions have content. Like CouchDB after compaction, an
+ancestor keeps its id and parent link (so `_revisions`/`_revs_diff`
+work) but not its body, so reading a non-leaf revision — `?rev=`,
+`open_revs`, or `_bulk_get` without `latest` — reports it `missing`,
+and `revs_info` lists it as `missing`. Each branch keeps its newest
+1000 revisions (CouchDB's default `revs_limit`); older ones are dropped.
 
 ### `PUT /{db}/{id}`
 Two modes, same as `_bulk_docs`, selected by `?new_edits=`:

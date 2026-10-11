@@ -3,7 +3,7 @@
 //! See plan §4.3, §5.
 
 use crate::changes::{ChangeEvent, ChangeFeed};
-use crate::revtree::{RevId, RevNode, RevTree};
+use crate::revtree::{RevId, RevNode, RevTree, REVS_LIMIT};
 use bincode::Options;
 use sled::transaction::{ConflictableTransactionError, TransactionError};
 use sled::Transactional;
@@ -141,6 +141,10 @@ pub struct Db {
     pub docs: sled::Tree,
     pub local: sled::Tree,
     pub seq_log: sled::Tree,
+    /// doc id → that doc's current seq, so a write can delete the doc's
+    /// previous `seq_log` entry: one `_changes` entry per doc, not one per
+    /// write (see `put_tree`).
+    seq_by_doc: sled::Tree,
     /// Attachment bytes, keyed by content digest (`"sha256-<hex>"`) —
     /// not by doc id/rev/filename. Content-addressed storage means
     /// identical attachment content is only ever stored once, even if
@@ -151,15 +155,49 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn open(base: &sled::Db, name: &str, locks: &WriteLocks) -> sled::Result<Self> {
-        Ok(Self {
+    pub fn open(base: &sled::Db, name: &str, locks: &WriteLocks) -> StorageResult<Self> {
+        let db = Self {
             write_lock: locks.for_db(name),
             base: base.clone(),
             docs: base.open_tree(format!("{name}::docs"))?,
             local: base.open_tree(format!("{name}::local"))?,
             seq_log: base.open_tree(format!("{name}::seq"))?,
+            seq_by_doc: base.open_tree(format!("{name}::seqidx"))?,
             attachments: base.open_tree(format!("{name}::attachments"))?,
-        })
+        };
+        if db.seq_by_doc.is_empty() && !db.seq_log.is_empty() {
+            db.migrate_seq_index()?;
+        }
+        Ok(db)
+    }
+
+    /// One-time upgrade for databases written before v0.1.7, whose
+    /// `seq_log` holds an entry for every write ever made: keep each doc's
+    /// newest entry, delete the rest, and build the doc → seq index.
+    fn migrate_seq_index(&self) -> StorageResult<()> {
+        let _guard = self.write_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.seq_by_doc.is_empty() {
+            return Ok(()); // another request migrated while we waited
+        }
+        let mut newest: HashMap<String, u64> = HashMap::new();
+        let mut stale = Vec::new();
+        for (seq, doc_id) in self.changes_since(0)? {
+            if let Some(previous) = newest.insert(doc_id, seq) {
+                stale.push(previous);
+            }
+        }
+        let mut batch = sled::Batch::default();
+        for seq in stale {
+            batch.remove(&seq.to_be_bytes());
+        }
+        self.seq_log.apply_batch(batch)?;
+        let mut index = sled::Batch::default();
+        for (doc_id, seq) in newest {
+            index.insert(doc_id.as_bytes(), &seq.to_be_bytes());
+        }
+        self.seq_by_doc.apply_batch(index)?;
+        self.base.flush()?;
+        Ok(())
     }
 
     pub fn get_attachment(&self, digest: &str) -> StorageResult<Option<Vec<u8>>> {
@@ -207,6 +245,7 @@ impl Db {
         let _guard = self.write_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut tree = self.get_tree(doc_id)?.unwrap_or_default();
         let out = modify(&mut tree);
+        tree.prune(REVS_LIMIT);
         let seq = self.put_tree(doc_id, &tree)?;
         feed.publish(ChangeEvent { seq, doc_id: doc_id.to_string() });
         Ok((seq, out))
@@ -234,10 +273,15 @@ impl Db {
         // separately, a crash between them could keep the tree (so
         // `_revs_diff` says "have it" and the client never re-sends) but
         // lose the seq entry (so `_changes` never lists it and no other
-        // client ever pulls it).
-        (&self.docs, &self.seq_log)
-            .transaction(|(docs, seq_log)| -> Result<(), ConflictableTransactionError<()>> {
+        // client ever pulls it). The doc's previous `_changes` entry is
+        // removed in the same transaction: one entry per doc, so `seq_log`
+        // is bounded by the doc count instead of growing with every write.
+        (&self.docs, &self.seq_log, &self.seq_by_doc)
+            .transaction(|(docs, seq_log, seq_by_doc)| -> Result<(), ConflictableTransactionError<()>> {
                 docs.insert(doc_id.as_bytes(), bytes.as_slice())?;
+                if let Some(previous) = seq_by_doc.insert(doc_id.as_bytes(), &seq.to_be_bytes())? {
+                    seq_log.remove(previous.as_ref())?;
+                }
                 seq_log.insert(&seq.to_be_bytes(), doc_id.as_bytes())?;
                 Ok(())
             })
@@ -333,5 +377,71 @@ mod tests {
         // Also confirm no persisted seq is ever the sentinel value 0 —
         // that's what "since=0" needs to mean exclusively "nothing yet."
         assert!(changes[0].0 > 0);
+    }
+
+    /// Appends one plain edit on top of the current winner — what the
+    /// app-write path does for every `PUT`.
+    fn edit(db: &Db, doc_id: &str, n: usize, body: &serde_json::Value) {
+        db.update_tree(doc_id, &ChangeFeed::default(), |tree| {
+            let parent = tree.winner().cloned();
+            let rev = format!("{}-h{n:06}", n + 1);
+            tree.nodes.insert(rev, RevNode { parent, deleted: false, body: body.clone() });
+        })
+        .unwrap();
+    }
+
+    /// A long-lived doc must not grow without bound (see
+    /// doc/changelog.md, v0.1.7). Every node used to keep its full body
+    /// forever, the whole tree was rewritten on every write, and every
+    /// write appended a `_changes` entry that was never removed — so a doc
+    /// edited N times cost O(N) bodies on disk, O(N) per write, and O(N)
+    /// seq entries for every `since=0` scan to wade through.
+    #[test]
+    fn long_history_stays_bounded() {
+        let base = sled::Config::new().temporary(true).open().unwrap();
+        let db = Db::open(&base, "testdb", &WriteLocks::default()).unwrap();
+        let body = serde_json::json!({ "payload": "x".repeat(2048) });
+
+        for n in 0..10 {
+            edit(&db, "doc", n, &body);
+        }
+        let after_10 = db.docs.get("doc").unwrap().unwrap().len();
+        for n in 10..1500 {
+            edit(&db, "doc", n, &body);
+        }
+        let after_1500 = db.docs.get("doc").unwrap().unwrap().len();
+
+        // One 2 KB body (the leaf) plus at most 1000 small rev ids — not
+        // 1500 bodies (~3 MB).
+        assert!(
+            after_1500 < after_10 + 64 * 1024,
+            "stored tree grew from {after_10} to {after_1500} bytes over 1490 edits"
+        );
+        let tree = db.get_tree("doc").unwrap().unwrap();
+        assert!(tree.nodes.len() <= 1000, "kept {} revisions, revs_limit is 1000", tree.nodes.len());
+        assert_eq!(db.seq_log.len(), 1, "one doc must have exactly one _changes entry");
+        assert_eq!(db.changes_since(0).unwrap().len(), 1);
+    }
+
+    /// Databases written before v0.1.7 have one `seq_log` entry per write
+    /// and no doc → seq index. Opening one must collapse that to one entry
+    /// per doc (the newest), so later writes can keep it that way.
+    #[test]
+    fn opening_a_pre_index_database_migrates_its_seq_log() {
+        let base = sled::Config::new().temporary(true).open().unwrap();
+        let locks = WriteLocks::default();
+        {
+            let db = Db::open(&base, "legacy", &locks).unwrap();
+            for (seq, id) in [(1u64, "a"), (2, "b"), (3, "a"), (4, "a"), (5, "b"), (6, "c")] {
+                db.seq_log.insert(seq.to_be_bytes(), id).unwrap();
+            }
+        }
+        let db = Db::open(&base, "legacy", &locks).unwrap();
+        let mut entries = db.changes_since(0).unwrap();
+        entries.sort();
+        assert_eq!(entries, vec![(4, "a".to_string()), (5, "b".to_string()), (6, "c".to_string())]);
+
+        edit(&db, "a", 10, &serde_json::json!({}));
+        assert_eq!(db.seq_log.len(), 3, "a later write must replace a's entry, not add one");
     }
 }

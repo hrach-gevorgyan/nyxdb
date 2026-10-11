@@ -1,9 +1,13 @@
 //! Per-document revision tree: storage, winner-picking, `_revs_diff`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub type RevId = String; // "{generation}-{hash}"
+
+/// CouchDB's default `revs_limit`: how many revisions of history each branch
+/// keeps (see `RevTree::prune`) and the most `_revisions` ever reports.
+pub const REVS_LIMIT: usize = 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevNode {
@@ -70,11 +74,14 @@ impl RevTree {
     /// full ancestry) is still included — its id is known — and the walk
     /// stops there. Capped at CouchDB's default `revs_limit` (1000).
     pub fn ancestry(&self, rev: &str) -> Vec<RevId> {
-        const REVS_LIMIT: usize = 1000;
+        self.ancestry_limited(rev, REVS_LIMIT)
+    }
+
+    fn ancestry_limited(&self, rev: &str, limit: usize) -> Vec<RevId> {
         let mut out = Vec::new();
         let mut current = Some(rev.to_string());
         while let Some(id) = current {
-            if out.len() == REVS_LIMIT {
+            if out.len() == limit {
                 break;
             }
             let node = self.nodes.get(&id);
@@ -114,6 +121,32 @@ impl RevTree {
             gen_b.cmp(&gen_a).then_with(|| hash_b.cmp(hash_a))
         });
         out
+    }
+
+    pub fn is_leaf(&self, rev: &str) -> bool {
+        self.nodes.contains_key(rev) && !self.nodes.values().any(|n| n.parent.as_deref() == Some(rev))
+    }
+
+    /// Keeps a tree bounded no matter how often its doc is edited — the
+    /// equivalent of CouchDB's compaction plus revs_limit stemming, done on
+    /// every write:
+    ///
+    /// - only leaves keep a body; ancestors keep their id and parent link
+    ///   (so `_revisions`/`_revs_diff` still work) but not their content;
+    /// - each branch keeps its newest `revs_limit` revisions, and anything
+    ///   older that no branch still reaches is dropped.
+    ///
+    /// Without this, a doc edited N times held N full bodies forever and
+    /// every write re-serialised all of them (see doc/changelog.md, v0.1.7).
+    pub fn prune(&mut self, revs_limit: usize) {
+        let leaves: Vec<RevId> = self.leaves().into_iter().cloned().collect();
+        let keep: HashSet<RevId> = leaves.iter().flat_map(|leaf| self.ancestry_limited(leaf, revs_limit)).collect();
+        self.nodes.retain(|id, _| keep.contains(id));
+        for (id, node) in self.nodes.iter_mut() {
+            if !leaves.contains(id) {
+                node.body = serde_json::Value::Null;
+            }
+        }
     }
 
     /// `_bulk_docs` with `new_edits:false` (real replication push, plan
@@ -163,6 +196,53 @@ mod tests {
         tree.nodes.insert("3-c".into(), node(Some("2-b")));
         tree.nodes.insert("2-x".into(), node(Some("1-a")));
         tree
+    }
+
+    fn with_body(parent: Option<&str>, v: &str) -> RevNode {
+        RevNode { parent: parent.map(String::from), deleted: false, body: serde_json::json!({ "v": v }) }
+    }
+
+    /// Like CouchDB after compaction: only leaves keep a body. Ancestors
+    /// keep their id and parent link (history still works) but not their
+    /// content, and are never readable.
+    #[test]
+    fn prune_keeps_bodies_only_on_leaves() {
+        let mut tree = RevTree::default();
+        tree.nodes.insert("1-a".into(), with_body(None, "a"));
+        tree.nodes.insert("2-b".into(), with_body(Some("1-a"), "b"));
+        tree.nodes.insert("3-c".into(), with_body(Some("2-b"), "c"));
+        tree.nodes.insert("2-x".into(), with_body(Some("1-a"), "x"));
+        tree.prune(1000);
+        assert_eq!(tree.nodes["3-c"].body, serde_json::json!({ "v": "c" }));
+        assert_eq!(tree.nodes["2-x"].body, serde_json::json!({ "v": "x" }));
+        assert_eq!(tree.nodes["2-b"].body, serde_json::Value::Null);
+        assert_eq!(tree.nodes["1-a"].body, serde_json::Value::Null);
+        assert!(tree.is_leaf("3-c") && tree.is_leaf("2-x"));
+        assert!(!tree.is_leaf("2-b") && !tree.is_leaf("1-a"));
+        assert_eq!(tree.ancestry("3-c"), vec!["3-c", "2-b", "1-a"]);
+    }
+
+    /// Stemming to `revs_limit`: each branch keeps its newest `limit`
+    /// revisions; anything older that no branch still reaches is dropped.
+    #[test]
+    fn prune_stems_every_branch_to_the_limit() {
+        let mut tree = RevTree::default();
+        let mut parent: Option<String> = None;
+        for g in 1..=12 {
+            let rev = format!("{g}-m");
+            tree.nodes.insert(rev.clone(), node(parent.as_deref()));
+            parent = Some(rev);
+        }
+        // A short branch off generation 9.
+        tree.nodes.insert("10-s".into(), node(Some("9-m")));
+        tree.prune(5);
+        // 12-m keeps 12..8; 10-s keeps 10-s, 9..6. Nothing reaches 5..1.
+        let mut kept: Vec<&str> = tree.nodes.keys().map(String::as_str).collect();
+        kept.sort();
+        assert_eq!(kept, vec!["10-m", "10-s", "11-m", "12-m", "6-m", "7-m", "8-m", "9-m"]);
+        assert_eq!(&tree.ancestry("10-s")[..5], ["10-s", "9-m", "8-m", "7-m", "6-m"]);
+        assert_eq!(tree.leaves().len(), 2);
+        assert_eq!(tree.winner(), Some(&"12-m".to_string()));
     }
 
     #[test]

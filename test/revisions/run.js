@@ -12,6 +12,10 @@
 //         └── 2-x              (live conflict branch)
 //   t:  1-a ── 2-t             (tombstone; fully deleted doc)
 //
+// Only leaves have content. Like CouchDB after compaction, NyxDB keeps an
+// ancestor's id and parent link but not its body, so reading a non-leaf
+// revision by rev reports it missing (v0.1.7).
+//
 // Requires: SERVER_URL/OUR_USER/OUR_PASSWORD (defaults: 127.0.0.1:8085, testuser/testpass)
 
 const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8085";
@@ -65,21 +69,21 @@ async function buildTree(db) {
 async function testBulkGet(db) {
   const docsFor = (r) => r.body.results?.[0]?.docs || [];
 
-  const q = await req(db, "POST", "/_bulk_get?revs=true", { docs: [{ id: "d", rev: "2-b" }] });
+  const q = await req(db, "POST", "/_bulk_get?revs=true", { docs: [{ id: "d", rev: "2-x" }] });
   check(
     "_bulk_get ?revs=true returns _revisions walking back from the requested rev",
-    same(docsFor(q)[0]?.ok?._revisions, { start: 2, ids: ["b", "a"] }),
+    same(docsFor(q)[0]?.ok?._revisions, { start: 2, ids: ["x", "a"] }),
     JSON.stringify(q.body)
   );
 
-  const b = await req(db, "POST", "/_bulk_get", { revs: true, docs: [{ id: "d", rev: "2-b" }] });
+  const b = await req(db, "POST", "/_bulk_get", { revs: true, docs: [{ id: "d", rev: "2-x" }] });
   check(
     "_bulk_get with revs:true in the body returns _revisions too",
-    same(docsFor(b)[0]?.ok?._revisions, { start: 2, ids: ["b", "a"] }),
+    same(docsFor(b)[0]?.ok?._revisions, { start: 2, ids: ["x", "a"] }),
     JSON.stringify(b.body)
   );
 
-  const plain = await req(db, "POST", "/_bulk_get", { docs: [{ id: "d", rev: "2-b" }] });
+  const plain = await req(db, "POST", "/_bulk_get", { docs: [{ id: "d", rev: "2-x" }] });
   check(
     "_bulk_get without revs leaves _revisions out",
     docsFor(plain)[0]?.ok && docsFor(plain)[0].ok._revisions === undefined,
@@ -98,6 +102,13 @@ async function testBulkGet(db) {
     same(findOk(latestDocs, "3-c")?._revisions, { start: 3, ids: ["c", "b", "a"] }) &&
       same(findOk(latestDocs, "2-x")?._revisions, { start: 2, ids: ["x", "a"] }),
     JSON.stringify(latest.body)
+  );
+
+  const nonLeaf = await req(db, "POST", "/_bulk_get?revs=true", { docs: [{ id: "d", rev: "2-b" }] });
+  check(
+    "_bulk_get for a non-leaf rev (no latest) reports it missing, not an empty doc",
+    docsFor(nonLeaf)[0]?.error?.reason === "missing",
+    JSON.stringify(nonLeaf.body)
   );
 
   const latestMid = await req(db, "POST", "/_bulk_get?latest=true", { docs: [{ id: "d", rev: "2-b" }] });
@@ -135,11 +146,11 @@ async function testGetDoc(db) {
 
   const info = await req(db, "GET", "/d?revs_info=true");
   check(
-    "GET ?revs_info=true returns _revs_info along the winner's history",
+    "GET ?revs_info=true: the winner is available, its compacted ancestors are missing",
     same(info.body._revs_info, [
       { rev: "3-c", status: "available" },
-      { rev: "2-b", status: "available" },
-      { rev: "1-a", status: "available" },
+      { rev: "2-b", status: "missing" },
+      { rev: "1-a", status: "missing" },
     ]),
     JSON.stringify(info.body)
   );
@@ -158,12 +169,13 @@ async function testGetDoc(db) {
     JSON.stringify(all.body)
   );
 
-  const list = await req(db, "GET", `/d?open_revs=${encodeURIComponent('["2-b","9-nope"]')}&revs=true`);
+  const list = await req(db, "GET", `/d?open_revs=${encodeURIComponent('["2-x","2-b","9-nope"]')}&revs=true`);
   check(
-    "GET ?open_revs=[...] returns {ok} for stored revs and {missing} for unknown ones",
+    "GET ?open_revs=[...] returns {ok} for leaves and {missing} for non-leaf or unknown revs",
     Array.isArray(list.body) &&
-      list.body.length === 2 &&
-      list.body.some((e) => e.ok?._rev === "2-b" && same(e.ok._revisions, { start: 2, ids: ["b", "a"] })) &&
+      list.body.length === 3 &&
+      list.body.some((e) => e.ok?._rev === "2-x" && same(e.ok._revisions, { start: 2, ids: ["x", "a"] })) &&
+      list.body.some((e) => e.missing === "2-b") &&
       list.body.some((e) => e.missing === "9-nope"),
     JSON.stringify(list.body)
   );
@@ -184,11 +196,43 @@ async function testGetDoc(db) {
     JSON.stringify(tombAll.body)
   );
 
+  const ancestor = await req(db, "GET", "/d?rev=2-b");
+  check(
+    "GET ?rev=<non-leaf> is 404 missing, not an empty doc",
+    ancestor.status === 404 && ancestor.body.reason === "missing",
+    JSON.stringify(ancestor.body)
+  );
+
   const tombPlain = await req(db, "GET", "/t");
   check(
     "plain GET still 404s for a fully-deleted document",
     tombPlain.status === 404 && tombPlain.body.reason === "deleted",
     JSON.stringify(tombPlain.body)
+  );
+}
+
+// A doc edited more than revs_limit times keeps exactly revs_limit
+// revisions of history, and its oldest revisions are compacted away.
+async function testLongHistory(db) {
+  const edits = Number(process.env.REVISIONS_LONG_EDITS || 1100);
+  let rev;
+  let first;
+  for (let i = 0; i < edits; i++) {
+    const r = await req(db, "PUT", "/long", { i, ...(rev ? { _rev: rev } : {}) });
+    rev = r.body.rev;
+    first = first || rev;
+  }
+  const doc = await req(db, "GET", "/long?revs=true");
+  check(
+    `a doc edited ${edits} times reports exactly 1000 revisions of history`,
+    doc.body._revisions?.ids?.length === 1000 && doc.body._revisions.start === edits,
+    JSON.stringify({ start: doc.body._revisions?.start, ids: doc.body._revisions?.ids?.length })
+  );
+  const old = await req(db, "GET", `/long?rev=${first}`);
+  check(
+    "its first revision is compacted away: GET ?rev=<first> is 404 missing",
+    old.status === 404 && old.body.reason === "missing",
+    `${old.status} ${JSON.stringify(old.body).slice(0, 120)}`
   );
 }
 
@@ -200,6 +244,7 @@ async function main() {
     await buildTree(db);
     await testBulkGet(db);
     await testGetDoc(db);
+    await testLongHistory(db);
   } finally {
     await req(db, "DELETE", "");
   }

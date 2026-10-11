@@ -163,7 +163,7 @@ async fn delete_db(
     if !existed {
         return Err(not_found());
     }
-    for suffix in ["docs", "local", "seq", "attachments"] {
+    for suffix in ["docs", "local", "seq", "seqidx", "attachments"] {
         state.root.drop_tree(format!("{db_name}::{suffix}")).map_err(|_| internal_error())?;
     }
     Ok(Json(json!({"ok": true})))
@@ -215,7 +215,10 @@ struct GetDocParams {
 /// the winner (404 `deleted` if the winner is a tombstone).
 fn resolve_rev<'t>(tree: &'t RevTree, rev: Option<&str>) -> Result<(&'t RevId, &'t RevNode), ApiError> {
     match rev {
-        Some(rev) => tree.nodes.get_key_value(rev).ok_or_else(not_found),
+        // Only leaves have content (see `RevTree::prune`): a non-leaf rev is
+        // as unreadable as an unknown one, like CouchDB after compaction.
+        Some(rev) if tree.is_leaf(rev) => tree.nodes.get_key_value(rev).ok_or_else(not_found),
+        Some(_) => Err(not_found()),
         None => {
             let winner = tree.winner().ok_or_else(not_found)?;
             let node = &tree.nodes[winner];
@@ -246,6 +249,7 @@ async fn get_doc(
             .into_iter()
             .map(|rev| {
                 let status = match tree.nodes.get(&rev) {
+                    Some(_) if !tree.is_leaf(&rev) => "missing",
                     Some(n) if n.deleted => "deleted",
                     Some(_) => "available",
                     None => "missing",
@@ -293,7 +297,7 @@ fn open_revs_response(
     let mut out = Vec::new();
     for rev in requested {
         let found = if params.latest && !all { tree.leaves_descending_from(&rev) } else { vec![rev.clone()] };
-        let found: Vec<String> = found.into_iter().filter(|r| tree.nodes.contains_key(r)).collect();
+        let found: Vec<String> = found.into_iter().filter(|r| tree.is_leaf(r)).collect();
         if found.is_empty() {
             out.push(json!({"missing": rev}));
             continue;
@@ -693,7 +697,7 @@ async fn bulk_get(
                     None => return Ok(vec![json!({"error": {"id": id, "error": "not_found", "reason": "missing"}})]),
                 },
             };
-            Ok(rev_ids.iter().map(|rev_id| match tree.nodes.get(rev_id) {
+            Ok(rev_ids.iter().map(|rev_id| match tree.nodes.get(rev_id).filter(|_| tree.is_leaf(rev_id)) {
                 // A specific (or resolved-winner) revision that exists in
                 // the tree is a real, fetchable revision even if it's a
                 // tombstone — real CouchDB returns it as an "ok" result

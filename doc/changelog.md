@@ -73,6 +73,35 @@ both branches ended up with the winner's bytes. Both routes now honour
 `rev`, with `404 missing` for an unknown one. Test: added to
 `test/attachments/run.js`.
 
+**5. Unbounded growth (high).** Every revision kept its full body
+forever, every write re-serialised the whole tree, and every write
+appended a `_changes` entry that was never removed. Measured: a doc
+with a 2 KB body edited 1,500 times grew from 20 KB to 3.1 MB stored,
+and the test took ~12 s (each write rewriting everything before it).
+Now, on every write:
+
+- only leaves keep a body (like CouchDB after compaction); ancestors
+  keep id and parent link, so history and `_revs_diff` still work;
+- each branch is stemmed to its newest 1000 revisions (`revs_limit`);
+- the doc's previous `_changes` entry is removed in the same
+  transaction (a new doc → seq index), so `_changes` holds one entry per
+  doc and `since=0` scans are bounded by the doc count.
+
+Same test after the fix: tree stays bounded, one `_changes` entry,
+0.66 s. Existing databases are migrated once on open (duplicate
+`_changes` entries collapsed to each doc's newest); existing trees are
+pruned the next time each doc is written.
+
+Client-visible consequence: a non-leaf revision is no longer readable —
+`GET ?rev=`, `open_revs`, and `_bulk_get` without `latest` report it
+`missing`, and `revs_info` lists ancestors as `missing` (this also fixes
+the v0.1.6 known gap where empty ancestor placeholders reported
+`available`). Replication only reads leaves, and PouchDB always sends
+`latest=true`. Tests: `long_history_stays_bounded`,
+`opening_a_pre_index_database_migrates_its_seq_log` (storage),
+`prune_*` (revtree), and long-history/non-leaf checks in
+`test/revisions/run.js`.
+
 ## v0.1.6
 
 **Real replication bug: every edit of an already-synced doc became a
