@@ -76,22 +76,24 @@ pub async fn require_auth(State(state): State<AppState>, request: Request, next:
         return next.run(request).await;
     }
 
-    let provided = request
-        .headers()
+    if is_authorized(request.headers(), &state.creds) {
+        next.run(request).await
+    } else {
+        unauthorized()
+    }
+}
+
+/// Whether `headers` carry HTTP Basic credentials matching `creds`.
+pub fn is_authorized(headers: &axum::http::HeaderMap, creds: &Credentials) -> bool {
+    let provided = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Basic "))
         .and_then(|encoded| base64::engine::general_purpose::STANDARD.decode(encoded).ok())
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .and_then(|decoded| decoded.split_once(':').map(|(u, p)| (u.to_string(), p.to_string())));
-
-    match provided {
-        Some((user, pass))
-            if constant_time_eq(&user, &state.creds.username) && constant_time_eq(&pass, &state.creds.password) =>
-        {
-            next.run(request).await
-        }
-        _ => unauthorized(),
+        .and_then(|bytes| String::from_utf8(bytes).ok());
+    match provided.as_deref().and_then(|decoded| decoded.split_once(':')) {
+        Some((user, pass)) => constant_time_eq(user, &creds.username) && constant_time_eq(pass, &creds.password),
+        None => false,
     }
 }
 

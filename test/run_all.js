@@ -31,6 +31,7 @@ const SUITES = [
   "test/blocking/run.js",
   "test/durability/run.js",
   "test/ops/run.js",
+  "test/connections/run.js",
   "test/databases/run.js",
   "test/write_semantics/run.js",
   "test/read_surface/run.js",

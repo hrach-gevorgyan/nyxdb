@@ -142,10 +142,11 @@ async fn main() {
     // database); a file younger than the grace period is never swept, as
     // its revision may not be committed yet. Tests shorten it.
     let attachment_grace = std::time::Duration::from_secs(env_number("NYXDB_ATTACHMENT_GRACE_SECS", 3600));
+    let creds = Arc::new(creds);
     let state = AppState {
         root,
         feeds: ChangeFeedRegistry::default(),
-        creds: Arc::new(creds),
+        creds: creds.clone(),
         server_uuid: Arc::from(server_uuid),
         locks: nyxdb::storage::WriteLocks::default(),
         att_root: Arc::new(Path::new(&data_dir).join("att")),
@@ -166,6 +167,7 @@ async fn main() {
         timeout: (timeout_secs > 0).then(|| std::time::Duration::from_secs(timeout_secs)),
         slots: Arc::new(tokio::sync::Semaphore::new(slots as usize)),
         activity,
+        creds,
     };
     let mut app = app.layer(axum::middleware::from_fn_with_state(limits, nyxdb::limits::limit_requests)).layer(TraceLayer::new_for_http());
     // CORS must wrap auth (outermost), not the other way round: tower_http's
@@ -183,7 +185,16 @@ async fn main() {
     let app = tower::ServiceBuilder::new()
         .layer(NormalizePathLayer::trim_trailing_slash())
         .service(app);
-    let app = tower::make::Shared::new(app);
+
+    // Per-connection limits (see nyxdb::server): a request's headers must
+    // arrive within 30 s, a keep-alive connection with nothing in progress
+    // is closed after 120 s of silence, and at most 256 are open at once —
+    // far more than a few syncing devices use (each holds 2-3).
+    let connection_limits = nyxdb::server::ConnectionLimits {
+        header_timeout: std::time::Duration::from_secs(env_number("NYXDB_HEADER_TIMEOUT_SECS", 30).max(1)),
+        idle_timeout: std::time::Duration::from_secs(env_number("NYXDB_IDLE_TIMEOUT_SECS", 120).max(1)),
+        max_connections: env_number("NYXDB_MAX_CONNECTIONS", 256).max(1) as usize,
+    };
 
     let addr = std::env::var("NYXDB_ADDR").unwrap_or_else(|_| "127.0.0.1:5984".into());
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -199,10 +210,9 @@ async fn main() {
     // on their own, so instead of waiting on them indefinitely, flush as
     // soon as the signal arrives and give connections a short grace period.
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = axum::serve(listener, app).with_graceful_shutdown(async {
+    let server = tokio::spawn(nyxdb::server::serve(listener, app, connection_limits, async {
         let _ = stop_rx.await;
-    });
-    let server = tokio::spawn(async move { server.await });
+    }));
     shutdown_signal().await;
     tracing::info!("shutdown requested: flushing to disk");
     if let Err(e) = flush_root.flush_async().await {

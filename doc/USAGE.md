@@ -53,7 +53,10 @@ curl -u admin:<password> -X PUT http://127.0.0.1:5984/mydb     # needs auth
 | `NYXDB_ATTACHMENT_GRACE_SECS` | `3600` | an attachment file younger than this is never deleted by a sweep (it may belong to an upload whose revision isn't committed yet) |
 | `NYXDB_MAX_BODY_BYTES` | `268435456` (256 MB) | largest accepted request body; larger gets `413 {"error":"too_large"}` |
 | `NYXDB_REQUEST_TIMEOUT_SECS` | `300` | a request (including reading its body) that takes longer gets `408 {"error":"request_timeout"}`; `0` = no limit. `_changes` is exempt |
-| `NYXDB_MAX_CONCURRENT_REQUESTS` | `512` | requests in progress at once; more wait for a slot. `_changes` is exempt. This caps requests, not open connections |
+| `NYXDB_MAX_CONCURRENT_REQUESTS` | `512` | requests in progress at once; more wait for a slot. Authenticated `GET …/_changes` is exempt (from this and the request timeout) |
+| `NYXDB_HEADER_TIMEOUT_SECS` | `30` | a request's headers must arrive in full within this, counted from connecting (or from the first byte of a later request on the same connection); else the connection is closed |
+| `NYXDB_IDLE_TIMEOUT_SECS` | `120` | a keep-alive connection with no request in progress and no traffic for this long is closed. A request in progress — including a longpoll or continuous feed, heartbeat or not — is never cut |
+| `NYXDB_MAX_CONNECTIONS` | `256` | open connections at once; more are closed as soon as they connect. Accepted connections also get TCP keepalive (probes after 60 s of silence), so a vanished client is noticed |
 | `RUST_LOG` | `info` | log filter; `info,tower_http=debug` logs every request and its status and latency |
 
 Source: `db/src/main.rs`, `db/src/auth.rs`.

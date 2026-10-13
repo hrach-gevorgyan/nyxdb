@@ -57,6 +57,29 @@ byte, one file per content, no temp file left), unit tests for the sweep
 (conflict leaves kept; a write in progress is waited for; the age rule)
 and for an interrupted migration.
 
+**2. Connections time out and are capped.** `axum::serve` kept every
+connection open as long as the client liked: an idle or half-sent one —
+even unauthenticated, from anywhere on the LAN — stayed open forever,
+with no cap on how many. NyxDB now runs its own accept loop on hyper:
+
+- headers must arrive within `NYXDB_HEADER_TIMEOUT_SECS` (30 s), counted
+  from connecting or from a later request's first byte;
+- a keep-alive connection with no request in progress and no traffic for
+  `NYXDB_IDLE_TIMEOUT_SECS` (120 s) is closed. A request in progress —
+  until its response body ends, so a longpoll or continuous feed counts,
+  heartbeat or not — is never cut;
+- SO_KEEPALIVE on accepted sockets (probes after 60 s of silence);
+- at most `NYXDB_MAX_CONNECTIONS` (256) open; more are closed on accept.
+
+The `_changes` exemption from the request timeout and the request slot
+limit now needs an authenticated GET; before, the path alone decided.
+
+Tests: `test/connections` (own server, short limits: silent and
+half-sent connections closed after the header timeout, idle keep-alive
+after the idle timeout, the cap, and a heartbeat longpoll, a 6 s longpoll
+and a silent continuous feed all outliving both timeouts), unit tests
+for the expiry rule, SO_KEEPALIVE and the exemption.
+
 ## v0.1.7
 
 Fixes from a read-only review of v0.1.6, in its priority order. Each

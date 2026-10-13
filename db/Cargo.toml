@@ -17,6 +17,10 @@ md-5 = "0.10"
 tower-http = { version = "0.5", features = ["cors", "trace", "normalize-path"] }
 tower = "0.5"
 futures = "0.3"
+http-body = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+socket2 = "0.6"
 base64 = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

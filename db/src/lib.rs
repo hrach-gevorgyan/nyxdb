@@ -6,4 +6,5 @@ pub mod limits;
 pub mod maintenance;
 pub mod revtree;
 pub mod routes;
+pub mod server;
 pub mod storage;
