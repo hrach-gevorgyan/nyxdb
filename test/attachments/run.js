@@ -377,7 +377,35 @@ async function testCompactCollectsReplacedAttachments() {
   await req(db, "DELETE", "");
 }
 
+// Offlog reads attachments by name and relies on the Content-Type they
+// were stored with, for both a standalone upload and an inline one.
+async function testContentTypeOnRead() {
+  const db = "att_ctype_" + Date.now();
+  await req(db, "PUT", "");
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+  await req(db, "PUT", "/up/pic.png", png, { "Content-Type": "image/png" });
+  await req(
+    db,
+    "PUT",
+    "/inline",
+    JSON.stringify({ _attachments: { "note.md": { content_type: "text/markdown", data: Buffer.from("# hi").toString("base64") } } }),
+    { "Content-Type": "application/json" }
+  );
+  const auth = { Authorization: AUTH };
+  const up = await fetch(`${SERVER_URL}/${db}/up/pic.png`, { headers: auth });
+  const upBytes = Buffer.from(await up.arrayBuffer());
+  const inline = await fetch(`${SERVER_URL}/${db}/inline/note.md`, { headers: auth });
+  const inlineText = await inline.text();
+  check(
+    "GET of an attachment by name returns its bytes with the Content-Type it was stored with",
+    up.headers.get("content-type") === "image/png" && upBytes.equals(png) && inline.headers.get("content-type") === "text/markdown" && inlineText === "# hi",
+    `${up.headers.get("content-type")} / ${inline.headers.get("content-type")}`
+  );
+  await req(db, "DELETE", "");
+}
+
 async function main() {
+  await testContentTypeOnRead();
   await testCompactCollectsReplacedAttachments();
   await testMd5Digests();
   await testPullSkipsUnchangedAttachment();

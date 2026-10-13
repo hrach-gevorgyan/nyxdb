@@ -476,14 +476,15 @@ see `roadmap.md`.
 
 | Method | Checks | Where |
 |---|---|---|
-| Unit tests (34) | Winner-picking, conflicts, deletion/recreation, `_revs_diff`, ancestry walk, pruning/stemming, first-write `_changes` visibility, seq-index migration, persisted server id, longpoll race, unreadable docs in `_changes`, attachment compaction, legacy digests | `db/src/*.rs` |
+| Unit tests (45) | Winner-picking, conflicts, deletion/recreation, `_revs_diff`, ancestry walk, pruning/stemming, first-write `_changes` visibility, seq-index migration, persisted server id, longpoll race, unreadable docs in `_changes`, attachment sweep (conflict leaves, a write in progress, the age rule), interrupted attachment migration, doc counts and winners index, connection expiry, SO_KEEPALIVE, `_changes` exemption, legacy digests | `db/src/**/*.rs` |
 | Real PouchDB client, on 8.0.1 and 9.x | One-shot and `live:true` two-device sync; edits and deletions of already-synced docs stay conflict-free; batches over 100 docs and near the body limit; checkpoint resume across a restart | `test/integration/` (`POUCHDB=9` for 9.x) |
 | Revision history | `_bulk_get` `revs`/`latest`; `GET` `revs`/`revs_info`/`open_revs`/`rev`; long histories stay bounded | `test/revisions/` |
 | Concurrency | Concurrent writers to one doc keep every branch; `_changes` followers miss nothing under many writers | `test/concurrency/`, `test/changes_follow/` |
-| Durability | Every acknowledged write survives a hard kill | `test/durability/` |
+| Durability | Every acknowledged write survives a hard kill; upgrading from v0.1.5 and v0.1.7 (real binaries) moves attachments to files and survives two kills midway | `test/durability/`, `test/migration/` |
 | Feeds | longpoll/continuous `heartbeat` and `timeout` | `test/feeds/` |
 | HTTP surface | Database creation and names; `_deleted`, `DELETE`, `_local` revs; `_all_docs`, `_design/…`, db info, `_changes?limit` | `test/databases/`, `test/write_semantics/`, `test/read_surface/` |
-| Operations | Clean startup failures; bounded memory; no stalls under heavy scans; request timeout, concurrency limit, tracing, CORS max-age | `test/startup/`, `test/memory/`, `test/blocking/`, `test/ops/` |
+| Operations | Clean startup failures, including damaged stores and credentials; bounded memory; no stalls under heavy scans; request timeout, concurrency limit, tracing, CORS max-age | `test/startup/`, `test/memory/`, `test/blocking/`, `test/ops/` |
+| Long-run resources | Attachment disk space reclaimed (replace, delete docs, delete db; uploads during sweeps survive); memory flat over 1 GB of attachments; idle, half-sent and excess connections closed while live feeds stay up; `GET /{db}` and `_all_docs` don't slow down with size | `test/att_disk/`, `test/att_memory/`, `test/connections/`, `test/scale/` |
 | Differential vs. real CouchDB | Winner rev, `_conflicts`, `_changes`, `_revs_diff` diffed against a live CouchDB | `test/differential/` |
 | Load/soak | Large batch writes + many concurrent `feed=continuous` subscribers | `test/load/` |
 | Ported PouchDB test cases | Real edge cases from PouchDB's own test suite | `test/ported/` |

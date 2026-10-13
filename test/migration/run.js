@@ -2,7 +2,8 @@
 // (see doc/changelog.md, v0.1.8). The move must survive being killed at
 // any point and must never lose an attachment.
 //
-// 1. The real v0.1.7 binary (NYXDB_OLD_BIN) writes a database with many
+// 1. A real earlier release (NYXDB_OLD_BIN: v0.1.7, and v0.1.5 — what
+//    Offlog users run) writes a database with many
 //    attachments: standalone uploads, inline ones, a duplicate, and one on
 //    a conflict branch.
 // 2. This build starts on that data and is hard-killed as soon as its
@@ -70,6 +71,10 @@ async function main() {
       expected.set(`up${i}`, sha(bytes));
       contents.add(sha(bytes));
     }
+    const jpeg = crypto.randomBytes(SIZE);
+    await call(old, "PUT", "/typed/photo.jpg", jpeg, "image/jpeg");
+    expected.set("typed", sha(jpeg));
+    contents.add(sha(jpeg));
     const inline = crypto.randomBytes(SIZE);
     const docs = [0, 1].map((i) => ({ _id: `inline${i}`, _attachments: { "file.bin": { content_type: "application/octet-stream", data: inline.toString("base64") } } }));
     await call(old, "POST", "/_bulk_docs", { docs }); // same content twice: stored once
@@ -89,6 +94,10 @@ async function main() {
     expected.set(`conflicted?rev=2-${h("b")}`, sha(branch));
     contents.add(sha(branch));
   } finally {
+    // Releases before v0.1.7 acknowledged writes before flushing them and
+    // sled flushes every ~500 ms: let it, so the hard kill below doesn't
+    // lose the last writes (that bug is fixed, but not in the old binary).
+    await sleep(2000);
     await old.stop({ keepData: true });
   }
 
@@ -112,15 +121,18 @@ async function main() {
       const lost = [];
       for (const [doc, digest] of expected) {
         const [id, query] = doc.split("?");
-        const r = await call(server, "GET", `/${id}/file.bin${query ? "?" + query : ""}`);
+        const name = id === "typed" ? "photo.jpg" : "file.bin";
+        const r = await call(server, "GET", `/${id}/${name}${query ? "?" + query : ""}`);
         if (r.status !== 200 || sha(r.bytes) !== digest) lost.push(`${doc} (${r.status})`);
       }
       check(`all ${expected.size} attachments read back byte for byte, conflict branch included`, lost.length === 0, lost.slice(0, 5).join(", "));
+      const typed = await fetch(`${server.url}/mig/typed/photo.jpg`, { headers: { Authorization: server.auth } });
+      check("a migrated attachment keeps its Content-Type", typed.headers.get("content-type") === "image/jpeg", String(typed.headers.get("content-type")));
       const info = JSON.parse((await call(server, "GET", "")).bytes.toString());
       const page = JSON.parse((await call(server, "GET", "/_all_docs?limit=5")).bytes.toString());
       check(
-        "doc counts and _all_docs are right on a database written by v0.1.7",
-        info.doc_count === COUNT + 3 && info.doc_del_count === 0 && page.total_rows === COUNT + 3 && page.rows.length === 5,
+        "doc counts and _all_docs are right on a database written by the old release",
+        info.doc_count === COUNT + 4 && info.doc_del_count === 0 && page.total_rows === COUNT + 4 && page.rows.length === 5,
         JSON.stringify(info)
       );
       const attDir = path.join(dataDir, "att", "mig");

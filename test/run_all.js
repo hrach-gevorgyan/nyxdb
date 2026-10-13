@@ -99,23 +99,23 @@ function runSuite(file, env) {
   });
 }
 
-/// The v0.1.7 binary, for the upgrade test (test/migration): built once
-/// from the v0.1.7 tag into target/compat and reused after that.
-function oldBinary() {
+/// A released binary, for the upgrade test (test/migration): built once
+/// from its tag into target/compat and reused after that.
+function oldBinary(tag) {
   const exe = process.platform === "win32" ? "nyxdb.exe" : "nyxdb";
-  const out = path.join(REPO, "target", "compat", "v0.1.7", exe);
+  const out = path.join(REPO, "target", "compat", tag, exe);
   if (fs.existsSync(out)) return out;
-  const src = path.join(REPO, "target", "compat", "src-v0.1.7");
+  const src = path.join(REPO, "target", "compat", `src-${tag}`);
   const git = (...args) => spawnSync("git", args, { cwd: REPO, encoding: "utf8" });
   if (!fs.existsSync(src)) {
-    const added = git("worktree", "add", "--detach", src, "v0.1.7");
-    if (added.status !== 0) throw new Error(`can't check out v0.1.7 (fetch the tags?): ${added.stderr}`);
+    const added = git("worktree", "add", "--detach", src, tag);
+    if (added.status !== 0) throw new Error(`can't check out ${tag} (fetch the tags?): ${added.stderr}`);
   }
   const built = spawnSync("cargo", ["build", "--release", "--manifest-path", path.join(src, "db", "Cargo.toml"), "--target-dir", path.join(REPO, "target", "compat", "build")], {
     cwd: REPO,
     encoding: "utf8",
   });
-  if (built.status !== 0) throw new Error(`building v0.1.7 failed: ${built.stderr.slice(-2000)}`);
+  if (built.status !== 0) throw new Error(`building ${tag} failed: ${built.stderr.slice(-2000)}`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.copyFileSync(path.join(REPO, "target", "compat", "build", "release", exe), out);
   git("worktree", "remove", "--force", src);
@@ -124,7 +124,7 @@ function oldBinary() {
 
 async function suites(server) {
   const env = {
-    NYXDB_OLD_BIN: selected(SUITES).includes("test/migration/run.js") ? oldBinary() : "",
+    NYXDB_OLD_BIN: selected(SUITES).includes("test/migration/run.js") ? oldBinary("v0.1.7") : "",
     SERVER_URL: server.url,
     OUR_USER: "runall",
     OUR_PASSWORD: "runall-pass",
@@ -135,6 +135,10 @@ async function suites(server) {
     ["", selected(SUITES), {}],
     ["[pouchdb 9] ", selected(POUCHDB_SUITES), { POUCHDB: "9" }],
   ];
+  // Offlog's users run v0.1.5: upgrade from it too.
+  if (selected(SUITES).includes("test/migration/run.js")) {
+    passes.push(["[from v0.1.5] ", ["test/migration/run.js"], { NYXDB_OLD_BIN: oldBinary("v0.1.5") }]);
+  }
   for (const [label, list, extra] of passes) {
     for (const file of list) {
       const started = Date.now();

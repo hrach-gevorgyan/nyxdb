@@ -5,13 +5,23 @@
 > `COUCHDB_CLONE_*` env var prefix (now `NYXDB_*`) — left as an honest
 > historical record rather than rewritten.
 
-## v0.1.8 (unreleased)
+## v0.1.8
 
 Fixes for long-run problems found by auditing v0.1.7 inside Offlog, each
 confirmed by running the v0.1.7 binary. As before, every fix is
 test-first: the new test failed before the fix and fails again with the
 fix deliberately broken. New tests also watch resource behaviour (disk,
 memory) over time, not only correctness.
+
+Upgrading: Offlog's users run v0.1.5, so the upgrade test runs from the
+real v0.1.5 and v0.1.7 binaries (built from their tags by
+`test/run_all.js`): attachments, conflicts, counts and Content-Types all
+survive, including two hard kills mid-migration. Nothing Offlog relies
+on changed: `_revisions` on reads, `_bulk_get`, `_revs_diff`,
+`_bulk_docs new_edits:false`, `_local` docs, attachment `GET` by name
+with its Content-Type (now checked by `test/attachments`), the
+`_changes` longpoll and heartbeat, the `GET /` uuid, and `NYXDB_ADDR`,
+`NYXDB_DATA`, `NYXDB_USER`, `NYXDB_PASSWORD`.
 
 **1. Attachment bytes are files, not sled values.** In v0.1.7 they lived
 in sled, which cost ~2.6× their size on disk and never gave it back
