@@ -7,12 +7,14 @@
 // default, NYXDB_CACHE_MB to tune).
 //
 // This test owns its server process: write ~100 MB of 2 KB docs, restart,
-// read everything back. In each phase memory is measured halfway and at
-// the end. The check is that it stops growing — the second half of the
-// data adds little — not a fixed number: resident memory is counted
-// differently per OS (Windows working set vs Linux RSS with glibc
-// arenas), so an absolute limit tuned on one fails on the other. A
-// generous ceiling is checked too.
+// read everything back. In each phase memory is measured at the start and
+// after each third of the data. The check is the shape, not a number: a
+// bounded cache fills during the first part and then levels off, so the
+// last third adds far less than the first; v0.1.6's unbounded cache grew
+// at the same rate throughout. Absolute numbers differ per OS (Windows
+// working set vs Linux RSS with glibc arenas) and the point where the
+// cache is full varies, so a fixed limit or a halfway split was flaky on
+// one or the other. A generous ceiling is checked too.
 //
 // Attachments (files since v0.1.8) are covered by test/att_memory.
 //
@@ -26,8 +28,9 @@ const PORT = Number(process.env.MEMORY_PORT || 8295);
 const BASE = `http://127.0.0.1:${PORT}`;
 const AUTH = basicAuth("mem", "mem");
 const DATA_MB = Number(process.env.MEMORY_DATA_MB || 100);
-// Second half of the data may add at most this much (unbounded growth adds ~50 MB).
-const GROWTH_MB = Number(process.env.MEMORY_GROWTH_MB || 25);
+// The last third may add at most half of what the first third added, plus
+// this much for allocator noise.
+const SLACK_MB = Number(process.env.MEMORY_SLACK_MB || 8);
 const CEILING_MB = Number(process.env.MEMORY_CEILING_MB || 200);
 const PER_BATCH = 1000; // 2 KB docs -> ~2 MB per request, so request parsing stays small
 
@@ -43,35 +46,37 @@ async function main() {
   const dataDir = server.dataDir;
   try {
     await fetch(`${BASE}/mem`, { method: "PUT", headers: { Authorization: AUTH } });
-    const half = Math.floor(batches / 2);
-    const write = [];
+    const marks = new Set([Math.floor(batches / 3), Math.floor((2 * batches) / 3)].map((n) => n - 1));
+    const write = [residentMB(server.child.pid)];
     for (let b = 0; b < batches; b++) {
       const docs = Array.from({ length: PER_BATCH }, (_, i) => ({ _id: `d${b}-${i}`, blob: crypto.randomBytes(1536).toString("base64") }));
       const r = await post("/_bulk_docs", { docs });
       if (!r.ok) throw new Error(`write failed: ${r.status}`);
-      if (b === half - 1) write.push(residentMB(server.child.pid));
+      if (marks.has(b)) write.push(residentMB(server.child.pid));
     }
     write.push(residentMB(server.child.pid));
 
     await server.stop({ keepData: true });
     server = await start(dataDir);
-    const read = [];
+    const read = [residentMB(server.child.pid)];
     for (let b = 0; b < batches; b++) {
       for (let off = 0; off < PER_BATCH; off += 1000) {
         const docs = Array.from({ length: 1000 }, (_, i) => ({ id: `d${b}-${off + i}` }));
         await (await post("/_bulk_get", { docs })).arrayBuffer();
       }
-      if (b === half - 1) read.push(residentMB(server.child.pid));
+      if (marks.has(b)) read.push(residentMB(server.child.pid));
     }
     read.push(residentMB(server.child.pid));
 
     const mb = (x) => `${Math.round(x)} MB`;
-    console.log(`resident memory: writing ${mb(write[0])} at ${DATA_MB / 2} MB, ${mb(write[1])} at ${DATA_MB} MB; reading ${mb(read[0])} -> ${mb(read[1])}`);
-    for (const [phase, [mid, end]] of [["writing", write], ["reading back (fresh process)", read]]) {
+    console.log(`resident memory at 0, 1/3, 2/3, all of ${DATA_MB} MB: writing ${write.map(mb).join(" -> ")}; reading ${read.map(mb).join(" -> ")}`);
+    for (const [phase, [start, third, twoThirds, end]] of [["writing", write], ["reading back (fresh process)", read]]) {
+      const first = third - start;
+      const last = end - twoThirds;
       check(
-        `${phase}: the second ${DATA_MB / 2} MB of data adds under ${GROWTH_MB} MB of memory`,
-        end - mid < GROWTH_MB,
-        `${mb(mid)} -> ${mb(end)}`
+        `${phase}: memory levels off — the last third of the data adds under half what the first third did`,
+        last < first / 2 + SLACK_MB,
+        `first third +${mb(first)}, last third +${mb(last)}`
       );
       check(`${phase}: memory stays under ${CEILING_MB} MB`, end < CEILING_MB, mb(end));
     }
