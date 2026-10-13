@@ -104,9 +104,9 @@ async fn main() {
         },
     };
     config = config.cache_capacity(cache_mb * 1024 * 1024);
-    let root = match config.open() {
+    let root = match nyxdb::storage::open_store(config, Path::new(&data_dir)) {
         Ok(root) => Arc::new(root),
-        Err(e) => fail(EXIT_DATA, &format!("can't open the data directory {data_dir:?}: {e}")),
+        Err(why) => fail(EXIT_DATA, &why),
     };
     let flush_root = root.clone();
     let server_uuid = nyxdb::storage::server_uuid(&root)

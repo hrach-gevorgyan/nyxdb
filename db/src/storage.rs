@@ -610,6 +610,14 @@ impl Db {
     /// values in 1..=u64::MAX, so 0 is never a real assigned value and
     /// can safely mean only "nothing yet." Found live-testing; see
     /// `doc/changelog.md`.
+    ///
+    /// EXPECTED, DON'T "FIX": seqs (and `update_seq`) jump by roughly two
+    /// million after every restart. sled hands out ids from blocks it
+    /// reserves ahead on disk, and on reopen it skips past the whole last
+    /// reserved block so an id is never reused after a crash. `since` is an
+    /// opaque, increasing checkpoint; nothing depends on seqs being
+    /// contiguous, and replacing this with a counter written on every
+    /// write would cost a disk write per document.
     fn next_seq(&self) -> StorageResult<u64> {
         Ok(self.base.generate_id()? + 1)
     }
@@ -733,6 +741,44 @@ impl Drop for TestDir {
 }
 
 pub type SharedRoot = Arc<sled::Db>;
+
+/// Opens the sled store in `dir`, or says in one line why it can't be used
+/// — which `main` turns into exit code 3 ("the store can't be opened or is
+/// damaged"; Offlog then moves the folder aside and starts fresh).
+///
+/// Two failure modes beyond sled returning an error: sled can panic on
+/// damaged files, and — worse — when there is no snapshot to check
+/// against (a hard kill before sled's first snapshot, which is how Offlog
+/// stops NyxDB), it silently recovers a damaged `db` file as an *empty*
+/// store. v0.1.7 then served that empty store under a new server id and
+/// wrote over the damaged file. A store that existed before (its `conf`
+/// file is there) but opens with no database and no server id is
+/// therefore treated as damaged, before anything is written to it. A
+/// store that really was empty loses nothing by being reset.
+///
+/// Not detectable: damage that cuts the log short. sled recovers the
+/// writes before the damage, exactly as after a crash.
+pub fn open_store(config: sled::Config, dir: &Path) -> Result<sled::Db, String> {
+    let existed = dir.join("conf").is_file();
+    // sled may panic on damaged files: report it as one line, not a panic.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| config.open()));
+    std::panic::set_hook(previous_hook);
+    let root = match opened {
+        Ok(Ok(root)) => root,
+        Ok(Err(e)) => return Err(format!("can't open the store in {dir:?}: {e}")),
+        Err(panic) => {
+            let why = panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()));
+            return Err(format!("the store in {dir:?} is damaged: {}", why.unwrap_or_else(|| "sled panicked while opening it".into())));
+        }
+    };
+    let empty = root.is_empty() && root.tree_names().iter().all(|name| name.as_ref() == b"__sled__default");
+    if existed && empty {
+        return Err(format!("the store in {dir:?} is damaged: it existed, but no data could be read from it"));
+    }
+    Ok(root)
+}
 
 /// CouchDB's database-name rule: starts with a lowercase letter, then
 /// lowercase letters, digits, and `_ $ ( ) + - /`, at most 238 chars.

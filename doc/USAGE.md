@@ -63,9 +63,15 @@ Source: `db/src/main.rs`, `db/src/auth.rs`.
 
 **Startup failures** print one line to stderr and exit with a code you
 can act on, instead of panicking: `2` = a setting above is invalid
-(named in the message), `3` = the data directory can't be opened or
-initialised, `4` = can't listen on `NYXDB_ADDR` (e.g. port already in
-use).
+(named in the message), `3` = the data directory or its store can't be
+opened or is damaged, or `credentials.json` exists but can't be read
+(the file is left as it was, never replaced), `4` = can't listen on
+`NYXDB_ADDR` (e.g. port already in use). A store counts as damaged when
+sled reports an error or panics opening it, or when it existed before
+but opens with no database and no server id (sled silently recovers
+some damaged files as an empty store; NyxDB refuses to start on one
+rather than serve it). Damage that only cuts off the most recent writes
+can't be told apart from a crash and isn't detected.
 
 **Memory.** Measured with 100 MB of small (2 KB) docs: ~105 MB resident
 at the default cache size, versus ~195 MB with sled's own 1 GB default.

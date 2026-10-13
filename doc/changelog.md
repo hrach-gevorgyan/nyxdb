@@ -96,6 +96,35 @@ trees after creates, updates, deletes, recreates, conflicts with a
 deleted branch, batches repeating an id across chunks, a reopen, and a
 rebuild for an old database.
 
+**4. `credentials.json` is written atomically and never silently
+replaced.** It is written to a temp file, fsynced, and renamed into
+place. A file that exists but can't be parsed used to be replaced by a
+new random password — locking out every client holding the old one; now
+startup exits 3 naming the file, and leaves it as it was. Test:
+`test/startup` (an unparseable file exits 3 with one stderr line and is
+untouched; a first start leaves a valid file and no temp file). The
+atomic write itself has no failing-first test: a crash between write
+and rename can't be reproduced from a test.
+
+**5. Exit code 3 also covers a damaged store.** Exit 3 means "the store
+can't be opened or is damaged" (Offlog then moves the data folder aside
+and starts fresh). v0.1.7 did exit 3 when sled reported an error, but
+when there was no sled snapshot to check against — a hard kill before
+sled's first snapshot, which is how Offlog stops NyxDB — a damaged
+`db` file (zero-filled, emptied, or overwritten with garbage) was
+silently opened as an *empty* store, served under a new server id, and
+written over. Now a store that existed before (its `conf` is there) but
+opens with no database and no server id exits 3, before anything is
+written, and a sled panic while opening exits 3 too; each with one
+stderr line saying why. Not detectable: damage that only cuts the log
+short (sled recovers the writes before it, as after a crash). Test:
+`test/startup` (four kinds of damage; the v0.1.7 binary started empty on
+all four).
+
+**6.** A comment at `Db::next_seq` explains that `update_seq` jumping by
+~2 million per restart is expected (sled reserves ids in blocks), so
+nobody "fixes" it.
+
 ## v0.1.7
 
 Fixes from a read-only review of v0.1.6, in its priority order. Each

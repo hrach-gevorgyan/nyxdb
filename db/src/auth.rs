@@ -45,16 +45,36 @@ impl Credentials {
             return Ok(Self { username, password });
         }
 
+        // A file that exists but can't be read or parsed is an error, never
+        // a reason to mint a new password: that silently locked out every
+        // client holding the old one (before v0.1.8).
         let path = data_dir.join("credentials.json");
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(creds) = serde_json::from_slice(&bytes) {
-                return Ok(creds);
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                return serde_json::from_slice(&bytes).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, format!("it exists but can't be parsed ({e})"))
+                })
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
         }
 
         std::fs::create_dir_all(data_dir)?;
         let creds = Self { username: "admin".to_string(), password: uuid::Uuid::new_v4().to_string() };
-        std::fs::write(&path, serde_json::to_vec_pretty(&creds)?)?;
+        write_atomically(&path, &serde_json::to_vec_pretty(&creds)?)?;
+        Ok(creds)
+    }
+}
+
+/// Writes `bytes` to `path` so that `path` is either absent or complete,
+/// even if the process dies midway: a temp file in the same folder,
+/// fsynced, then renamed over `path`.
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let temp = path.with_extension(format!("json.tmp-{}", uuid::Uuid::new_v4().simple()));
+    let written = (|| {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(bytes)?;
         // A freshly-written file otherwise inherits the process umask —
         // often world-readable on Linux (the Docker deployment path).
         // No Windows equivalent via std; Windows ACLs default to the
@@ -62,10 +82,16 @@ impl Credentials {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
-        Ok(creds)
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
+    written
 }
 
 /// `GET /` (server identification) is exempt — real CouchDB serves this
