@@ -24,6 +24,10 @@
    passed once.
 4. Check `open-questions.md` for anything newly relevant.
 5. Update `changelog.md`.
+6. Push, wait for CI to pass on the commit, then tag it (`vX.Y.Z`,
+   annotated). Add the GitHub release notes as
+   `doc/releases/vX.Y.Z.md`: the Release workflow publishes a release
+   for any version with both a tag and notes, whichever is pushed last.
 
 ## Dependencies
 Keep the list small — the whole premise is a small, auditable protocol
