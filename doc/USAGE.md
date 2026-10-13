@@ -50,6 +50,7 @@ curl -u admin:<password> -X PUT http://127.0.0.1:5984/mydb     # needs auth
 | `NYXDB_CORS_ORIGINS` | unset (CORS off) | comma-separated allowed origins, no wildcard |
 | `NYXDB_CACHE_MB` | `32` | sled page-cache size; real memory is roughly 25 MB + 2× this (see below) |
 | `NYXDB_COMPRESSION_LEVEL` | sled's default (5) | zstd level, 1–22 |
+| `NYXDB_ATTACHMENT_GRACE_SECS` | `3600` | an attachment file younger than this is never deleted by a sweep (it may belong to an upload whose revision isn't committed yet) |
 | `NYXDB_MAX_BODY_BYTES` | `268435456` (256 MB) | largest accepted request body; larger gets `413 {"error":"too_large"}` |
 | `NYXDB_REQUEST_TIMEOUT_SECS` | `300` | a request (including reading its body) that takes longer gets `408 {"error":"request_timeout"}`; `0` = no limit. `_changes` is exempt |
 | `NYXDB_MAX_CONCURRENT_REQUESTS` | `512` | requests in progress at once; more wait for a slot. `_changes` is exempt. This caps requests, not open connections |
@@ -65,11 +66,10 @@ use).
 
 **Memory.** Measured with 100 MB of small (2 KB) docs: ~105 MB resident
 at the default cache size, versus ~195 MB with sled's own 1 GB default.
-Known limit: in sled 0.34 the cache cap does *not* bound large values
-(~1 MB each, e.g. big attachments) — memory then tracks the data
-touched (200 MB of 1 MB docs → ~230 MB, with any cap). Offlog-sized
-databases are far below that; keeping attachment bytes outside sled
-would remove the limit and is an open option.
+Attachment bytes don't go through sled's cache at all (they are files,
+see Attachments): 1 GB of attachments written and read back leaves
+memory flat at ~30 MB. Large *documents* (~1 MB of JSON each) still do,
+and sled 0.34's cache cap doesn't bound values that size.
 
 Storage work runs on tokio's blocking pool, so slow requests (a full
 `_changes` scan of a large db) don't stall unrelated ones.
@@ -115,7 +115,8 @@ curl -u user:pass -X PUT http://127.0.0.1:5984/mydb
 ```
 
 ### `DELETE /{db}`
-Delete a database. Not part of the replication protocol — added for
+Delete a database, including its attachment files
+(`<data>/att/<db>/`). Not part of the replication protocol — added for
 test/dev cleanup. `404` if it doesn't exist.
 
 ```bash
@@ -149,11 +150,14 @@ GET/PUT/DELETE design docs (id `_design/{name}`). They are stored and
 replicated like any doc; NyxDB doesn't run views.
 
 ### `POST /{db}/_compact`
-Deletes attachment bytes that no stored revision refers to any more
-(replaced attachments, and ones only an old, pruned revision had).
-Returns `202 {"ok":true}` once done — unlike CouchDB, it runs before
-answering. Attachment writes to that database wait while it runs. Run it
-occasionally on databases whose attachments change.
+Deletes attachment files that no stored revision refers to any more
+(replaced attachments, deleted docs' attachments, and ones only an old,
+pruned revision had) — but never one younger than
+`NYXDB_ATTACHMENT_GRACE_SECS` (1 hour). Conflict branches' attachments
+are kept. Returns `202 {"ok":true}` once done — unlike CouchDB, it runs
+before answering. Attachment writes to that database wait while it
+runs. The same sweep also runs by itself a minute after startup and
+then about daily when the server is idle, so calling this is optional.
 
 ```bash
 curl -u user:pass -X POST -H "Content-Type: application/json" http://127.0.0.1:5984/mydb/_compact
@@ -285,8 +289,15 @@ curl -u user:pass -X PUT http://127.0.0.1:5984/mydb/doc1/note.txt \
 get `404 missing` if that rev isn't stored. `DELETE /{db}/{id}/{attname}` removes it (the doc's
 other fields and other attachments are untouched).
 
-Attachment bytes are stored once per unique content (content-addressed
-by digest), even if referenced by multiple documents or revisions.
+Attachment bytes are files, one per distinct content, named by its
+sha256: `<data>/att/<db>/<sha256>` (identical content is stored once,
+however many documents or revisions use it). Each is written to a temp
+file, fsynced and renamed into place before the write is acknowledged.
+Files no revision refers to are deleted by the attachment sweep (see
+`POST /{db}/_compact`). Attachments written before v0.1.8 were stored
+in sled; the first start of v0.1.8 moves them to files in the
+background (`attachment migration finished` in the log), reading them
+from sled meanwhile.
 
 Stub digests are CouchDB's `"md5-<base64>"` form — the same digest
 PouchDB computes for its own copy, which is how its replicator knows it

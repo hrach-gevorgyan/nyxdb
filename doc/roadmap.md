@@ -62,8 +62,6 @@ Mango/`_find` proxying and `_session` cookie auth are dropped from
 scope — no concrete need, not planned.
 
 ## Next
-- Move attachment bytes out of sled (its cache cap doesn't bound ~1 MB
-  values; see `USAGE.md` §3) — an open option, not started.
 - Keep testing against the real target app (Offlog).
 
 ## Status

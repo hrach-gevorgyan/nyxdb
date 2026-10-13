@@ -1,7 +1,9 @@
 //! sled-backed storage: one KV entry per document holding its serialized
 //! revision tree, a `(seq, doc_id)` log for `_changes` (one entry per doc,
-//! its latest write), attachment bytes, and `_local` docs.
+//! its latest write), `_local` docs, and the md5 -> sha256 index of
+//! attachments, whose bytes are files (`crate::blobs`).
 
+use crate::blobs::{BlobStore, SweepStats};
 use crate::changes::{ChangeEvent, ChangeFeed};
 use crate::revtree::{RevId, RevNode, RevTree, REVS_LIMIT};
 use bincode::Options;
@@ -11,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::time::Duration;
 
 /// Reads can fail two genuinely different ways: sled itself erroring
 /// (disk I/O, etc. — already a `Result` from sled), or the bytes we get
@@ -26,6 +30,8 @@ use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 pub enum StorageError {
     Sled(sled::Error),
     Corrupt(String),
+    /// Attachment files (`crate::blobs`).
+    Io(std::io::Error),
 }
 
 impl fmt::Display for StorageError {
@@ -33,11 +39,18 @@ impl fmt::Display for StorageError {
         match self {
             StorageError::Sled(e) => write!(f, "storage error: {e}"),
             StorageError::Corrupt(msg) => write!(f, "corrupt stored data: {msg}"),
+            StorageError::Io(e) => write!(f, "attachment file error: {e}"),
         }
     }
 }
 
 impl std::error::Error for StorageError {}
+
+impl From<std::io::Error> for StorageError {
+    fn from(e: std::io::Error) -> Self {
+        StorageError::Io(e)
+    }
+}
 
 impl From<sled::Error> for StorageError {
     fn from(e: sled::Error) -> Self {
@@ -160,29 +173,36 @@ pub struct Db {
     /// previous `seq_log` entry: one `_changes` entry per doc, not one per
     /// write (see `put_tree`).
     seq_by_doc: sled::Tree,
-    /// Attachment bytes, keyed by content digest (`"sha256-<hex>"`) —
-    /// not by doc id/rev/filename. Content-addressed storage means
-    /// identical attachment content is only ever stored once, even if
-    /// referenced by many revisions or documents; document bodies only
-    /// ever hold a small stub (`{"stub":true,"digest":...,"length":...}`)
-    /// pointing here, not the raw bytes. See `crate::attachments`.
-    pub attachments: sled::Tree,
-    /// md5 digest (`"md5-<base64>"`, what stubs expose) → content key.
+    /// Attachment bytes as files, one per distinct content, named by its
+    /// sha256 — content-addressed, so identical content is stored once
+    /// however many revisions refer to it. Document bodies hold only a
+    /// stub (`{"stub":true,"digest":...,"length":...}`). See
+    /// `crate::blobs` and `crate::attachments`.
+    blobs: BlobStore,
+    /// Where attachment bytes lived before v0.1.8 (`"sha256-<hex>"` →
+    /// bytes). Emptied by `migrate_legacy_attachments`; read as a fallback
+    /// until then.
+    pub legacy_attachments: sled::Tree,
+    /// md5 digest (`"md5-<base64>"`, what stubs expose) → content key
+    /// (`"sha256-<hex>"`).
     attachment_index: sled::Tree,
 }
 
 impl Db {
-    pub fn open(base: &sled::Db, name: &str, locks: &WriteLocks) -> StorageResult<Self> {
+    /// `att_root` is the folder holding every database's attachment folder
+    /// (`<data>/att`).
+    pub fn open(base: &sled::Db, att_root: &Path, name: &str, locks: &WriteLocks) -> StorageResult<Self> {
         let locks = locks.for_db(name);
         let db = Self {
             write_lock: locks.write,
             attachment_gate: locks.attachments,
+            blobs: BlobStore::for_db(att_root, name),
             base: base.clone(),
             docs: base.open_tree(format!("{name}::docs"))?,
             local: base.open_tree(format!("{name}::local"))?,
             seq_log: base.open_tree(format!("{name}::seq"))?,
             seq_by_doc: base.open_tree(format!("{name}::seqidx"))?,
-            attachments: base.open_tree(format!("{name}::attachments"))?,
+            legacy_attachments: base.open_tree(format!("{name}::attachments"))?,
             attachment_index: base.open_tree(format!("{name}::attmd5"))?,
         };
         if db.seq_by_doc.is_empty() && !db.seq_log.is_empty() {
@@ -221,33 +241,43 @@ impl Db {
     }
 
     /// Resolves a stub digest — `md5-…` (current) or `sha256-…` (stubs
-    /// written before v0.1.7, which were the content key itself).
-    fn attachment_key(&self, digest: &str) -> StorageResult<Option<sled::IVec>> {
-        if digest.starts_with("md5-") {
-            Ok(self.attachment_index.get(digest)?)
+    /// written before v0.1.7, which were the content key itself) — to the
+    /// content's sha256 in hex, which names its file.
+    fn attachment_hex(&self, digest: &str) -> StorageResult<Option<String>> {
+        let key = if digest.starts_with("md5-") {
+            match self.attachment_index.get(digest)? {
+                Some(key) => String::from_utf8_lossy(&key).into_owned(),
+                None => return Ok(None),
+            }
         } else {
-            Ok(Some(sled::IVec::from(digest.as_bytes())))
-        }
+            digest.to_string()
+        };
+        Ok(key.strip_prefix("sha256-").map(str::to_string))
     }
 
     pub fn get_attachment(&self, digest: &str) -> StorageResult<Option<Vec<u8>>> {
-        let Some(key) = self.attachment_key(digest)? else { return Ok(None) };
-        Ok(self.attachments.get(key)?.map(|bytes| bytes.to_vec()))
+        let Some(hex) = self.attachment_hex(digest)? else { return Ok(None) };
+        if let Some(bytes) = self.blobs.get(&hex)? {
+            return Ok(Some(bytes));
+        }
+        // Not migrated yet (see `migrate_legacy_attachments`).
+        Ok(self.legacy_attachments.get(format!("sha256-{hex}"))?.map(|bytes| bytes.to_vec()))
     }
 
     pub fn has_attachment(&self, digest: &str) -> StorageResult<bool> {
-        let Some(key) = self.attachment_key(digest)? else { return Ok(false) };
-        Ok(self.attachments.contains_key(key)?)
+        let Some(hex) = self.attachment_hex(digest)? else { return Ok(false) };
+        Ok(self.blobs.exists(&hex) || self.legacy_attachments.contains_key(format!("sha256-{hex}"))?)
     }
 
-    /// Stores `bytes` under their content key and indexes their md5
-    /// digest. Content-addressed: identical bytes are only stored once.
-    /// The first content to claim an md5 keeps it (a deliberately crafted
+    /// Stores `bytes` (content key `"sha256-<hex>"`) as a file, durably,
+    /// and indexes their md5 digest. Content-addressed: identical bytes are
+    /// stored once. The first content to claim an md5 keeps it (a crafted
     /// md5 collision can't redirect an existing stub to other bytes).
     pub fn put_attachment(&self, key: &str, md5: &str, bytes: &[u8]) -> StorageResult<()> {
-        if !self.attachments.contains_key(key)? {
-            self.attachments.insert(key, bytes)?;
-        }
+        let hex = key
+            .strip_prefix("sha256-")
+            .ok_or_else(|| StorageError::Corrupt(format!("attachment key is not sha256-<hex>: {key:?}")))?;
+        self.blobs.put(hex, bytes)?;
         let _ = self.attachment_index.compare_and_swap(md5, None as Option<&[u8]>, Some(key.as_bytes()))?;
         Ok(())
     }
@@ -258,40 +288,76 @@ impl Db {
         self.attachment_gate.read().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Deletes attachment bytes no stored revision refers to any more, and
-    /// their md5 index entries. Only leaves keep bodies (`RevTree::prune`),
-    /// so bytes only an old revision used are collected too. Returns how
-    /// many blobs were deleted.
-    pub fn compact_attachments(&self) -> StorageResult<usize> {
+    /// Mark and sweep. (a) Lists every attachment referenced by any stored
+    /// revision of any doc, conflict leaves included (only leaves keep
+    /// bodies, `RevTree::prune`). (b) Deletes this database's attachment
+    /// files that aren't on the list, and leftover temp files, but (c)
+    /// never one modified less than `grace` ago: it may belong to an upload
+    /// whose revision isn't committed yet. (d) The attachment gate is held
+    /// exclusively throughout, so no write can add a reference between
+    /// listing and deleting. md5 index entries whose bytes are gone are
+    /// removed too.
+    pub fn compact_attachments(&self, grace: Duration) -> StorageResult<SweepStats> {
         let _gate = self.attachment_gate.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut referenced: HashSet<sled::IVec> = HashSet::new();
+        let mut referenced: HashSet<String> = HashSet::new();
         for id in self.doc_ids()? {
             let Some(tree) = self.get_tree(&id)? else { continue };
             for node in tree.nodes.values() {
                 let Some(attachments) = node.body.get("_attachments").and_then(|a| a.as_object()) else { continue };
                 for digest in attachments.values().filter_map(|a| a.get("digest")?.as_str()) {
-                    if let Some(key) = self.attachment_key(digest)? {
-                        referenced.insert(key);
+                    if let Some(hex) = self.attachment_hex(digest)? {
+                        referenced.insert(hex);
                     }
                 }
             }
         }
-        let mut removed = 0;
-        for key in self.attachments.iter().keys() {
-            let key = key?;
-            if !referenced.contains(&key) {
-                self.attachments.remove(&key)?;
-                removed += 1;
-            }
-        }
+        let stats = self.blobs.sweep(&referenced, grace)?;
         for entry in self.attachment_index.iter() {
             let (md5, key) = entry?;
-            if !referenced.contains(&key) {
+            let hex = String::from_utf8_lossy(&key).strip_prefix("sha256-").unwrap_or_default().to_string();
+            if !self.blobs.exists(&hex) && !self.legacy_attachments.contains_key(&key)? {
                 self.attachment_index.remove(md5)?;
             }
         }
         self.base.flush()?;
-        Ok(removed)
+        Ok(stats)
+    }
+
+    /// Moves attachment bytes written before v0.1.8 out of sled into files.
+    /// Resumable and safe to kill at any point: each sled copy is removed
+    /// only after its file is durable (`BlobStore::put` fsyncs the file and
+    /// its folder before returning), and a file with its final name is
+    /// always complete, so a rerun just skips what's done. `progress(done,
+    /// total)` is called every `every` attachments. Returns how many moved.
+    pub fn migrate_legacy_attachments(&self, every: usize, mut progress: impl FnMut(usize, usize)) -> StorageResult<usize> {
+        let total = self.legacy_attachments.len();
+        let mut moved = 0;
+        for entry in self.legacy_attachments.iter() {
+            let (key, bytes) = entry?;
+            let name = String::from_utf8_lossy(&key).into_owned();
+            let Some(hex) = name.strip_prefix("sha256-") else {
+                return Err(StorageError::Corrupt(format!("legacy attachment key {name:?}")));
+            };
+            self.blobs.put(hex, &bytes)?;
+            self.legacy_attachments.remove(&key)?;
+            moved += 1;
+            if every > 0 && moved % every == 0 {
+                self.base.flush()?;
+                progress(moved, total);
+            }
+        }
+        self.base.flush()?;
+        Ok(moved)
+    }
+
+    /// Deletes temp files left by an earlier process killed mid-write.
+    pub fn remove_stale_attachment_temps(&self) -> StorageResult<usize> {
+        Ok(self.blobs.remove_stale_temps()?)
+    }
+
+    /// Deletes this database's attachment folder (`DELETE /{db}`).
+    pub fn remove_attachment_files(&self) -> StorageResult<()> {
+        Ok(self.blobs.remove_all()?)
     }
 
     /// Every stored doc id (tombstones included), in byte order.
@@ -520,6 +586,24 @@ impl Db {
     }
 }
 
+/// A temporary folder for unit tests' attachment files, deleted on drop.
+#[cfg(test)]
+pub(crate) struct TestDir(pub std::path::PathBuf);
+
+#[cfg(test)]
+impl TestDir {
+    pub(crate) fn new() -> Self {
+        Self(std::env::temp_dir().join(format!("nyxdb-unit-{}", uuid::Uuid::new_v4())))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 pub type SharedRoot = Arc<sled::Db>;
 
 /// CouchDB's database-name rule: starts with a lowercase letter, then
@@ -585,8 +669,9 @@ mod tests {
         // no real dependency on disk state, and avoids adding a dev-only
         // crate like `tempfile` just for one test (see doc/MAINTENANCE.md
         // on keeping the dependency list small).
+        let att = crate::storage::TestDir::new();
         let base = sled::Config::new().temporary(true).open().unwrap();
-        let db = Db::open(&base, "testdb", &WriteLocks::default()).unwrap();
+        let db = Db::open(&base, &att.0, "testdb", &WriteLocks::default()).unwrap();
 
         db.update_tree("only-doc", &ChangeFeed::default(), |tree| {
             tree.insert_revision_chain(&["1-aaa".to_string()], false, serde_json::json!({"x": 1}))
@@ -621,8 +706,9 @@ mod tests {
     /// seq entries for every `since=0` scan to wade through.
     #[test]
     fn long_history_stays_bounded() {
+        let att = crate::storage::TestDir::new();
         let base = sled::Config::new().temporary(true).open().unwrap();
-        let db = Db::open(&base, "testdb", &WriteLocks::default()).unwrap();
+        let db = Db::open(&base, &att.0, "testdb", &WriteLocks::default()).unwrap();
         let body = serde_json::json!({ "payload": "x".repeat(2048) });
 
         for n in 0..10 {
@@ -651,15 +737,16 @@ mod tests {
     /// per doc (the newest), so later writes can keep it that way.
     #[test]
     fn opening_a_pre_index_database_migrates_its_seq_log() {
+        let att = crate::storage::TestDir::new();
         let base = sled::Config::new().temporary(true).open().unwrap();
         let locks = WriteLocks::default();
         {
-            let db = Db::open(&base, "legacy", &locks).unwrap();
+            let db = Db::open(&base, &att.0, "legacy", &locks).unwrap();
             for (seq, id) in [(1u64, "a"), (2, "b"), (3, "a"), (4, "a"), (5, "b"), (6, "c")] {
                 db.seq_log.insert(seq.to_be_bytes(), id).unwrap();
             }
         }
-        let db = Db::open(&base, "legacy", &locks).unwrap();
+        let db = Db::open(&base, &att.0, "legacy", &locks).unwrap();
         let mut entries = db.changes_since(0).unwrap();
         entries.sort();
         assert_eq!(entries, vec![(4, "a".to_string()), (5, "b".to_string()), (6, "c".to_string())]);
@@ -685,13 +772,14 @@ mod tests {
         assert_eq!(first, second, "the uuid must be the same after reopening the data dir");
     }
 
-    /// Compaction deletes the bytes of attachments no revision uses any
+    /// Compaction deletes the files of attachments no revision uses any
     /// more — replaced ones, and ones only a pruned (non-leaf) revision had
     /// — and keeps every leaf's, conflict branches included.
     #[test]
     fn compaction_collects_only_unreferenced_attachments() {
+        let att = crate::storage::TestDir::new();
         let base = sled::Config::new().temporary(true).open().unwrap();
-        let db = Db::open(&base, "gc", &WriteLocks::default()).unwrap();
+        let db = Db::open(&base, &att.0, "gc", &WriteLocks::default()).unwrap();
         let feed = ChangeFeed::default();
         let stub = |data: &[u8]| {
             let digest = crate::attachments::store_raw_attachment(&db, data).unwrap();
@@ -707,13 +795,102 @@ mod tests {
         write(&["2-c", "1-a"], branch.clone());
         stub(b"never referenced");
 
-        assert_eq!(db.compact_attachments().unwrap(), 2);
+        let files = || std::fs::read_dir(att.0.join("gc")).unwrap().count();
+        assert_eq!(files(), 4);
+        assert_eq!(db.compact_attachments(Duration::ZERO).unwrap().files, 2);
         let digest = |body: &Value| body["_attachments"]["f"]["digest"].as_str().unwrap().to_string();
         assert!(db.get_attachment(&digest(&kept)).unwrap().is_some());
-        assert!(db.get_attachment(&digest(&branch)).unwrap().is_some());
+        assert!(db.get_attachment(&digest(&branch)).unwrap().is_some(), "a conflict leaf's attachment is kept");
         assert!(db.get_attachment(&digest(&old)).unwrap().is_none());
-        assert_eq!(db.attachments.len(), 2);
-        assert_eq!(db.compact_attachments().unwrap(), 0);
+        assert!(!db.has_attachment(&digest(&old)).unwrap(), "its md5 index entry is gone too");
+        assert_eq!(files(), 2);
+        assert_eq!(db.compact_attachments(Duration::ZERO).unwrap().files, 0);
+    }
+
+    /// An attachment stored by a write whose revision isn't committed yet
+    /// must survive a sweep that runs meanwhile: the sweep waits for the
+    /// write (attachment gate), and the age rule protects it regardless.
+    #[test]
+    fn a_sweep_never_removes_an_attachment_being_uploaded() {
+        let att = crate::storage::TestDir::new();
+        let base = sled::Config::new().temporary(true).open().unwrap();
+        let db = Db::open(&base, &att.0, "race", &WriteLocks::default()).unwrap();
+        let feed = ChangeFeed::default();
+
+        // With the age rule: stored, not referenced, newer than the grace.
+        let pending = crate::attachments::store_raw_attachment(&db, b"mid-upload").unwrap();
+        assert_eq!(db.compact_attachments(Duration::from_secs(3600)).unwrap().files, 0);
+        assert!(db.has_attachment(&pending).unwrap());
+
+        // With no grace at all, the gate alone: the sweep starts while the
+        // write holds it, so it can only list references after the commit.
+        let (stored_tx, stored_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let _gate = db.attachment_writer();
+                let digest = crate::attachments::store_raw_attachment(&db, b"uploaded during the sweep").unwrap();
+                stored_tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(300));
+                let body = json!({"_attachments": {"f": {"stub": true, "digest": digest, "length": 25}}});
+                db.update_tree("doc", &feed, |tree| tree.insert_revision_chain(&["1-a".to_string()], false, body)).unwrap();
+                digest
+            });
+            stored_rx.recv().unwrap();
+            db.compact_attachments(Duration::ZERO).unwrap();
+            let digest = writer.join().unwrap();
+            assert!(db.has_attachment(&digest).unwrap(), "the sweep deleted an attachment committed while it waited");
+        });
+    }
+
+    /// Attachments written before v0.1.8 live in sled. Moving them to files
+    /// must survive an interruption at any point and never lose one.
+    #[test]
+    fn an_interrupted_attachment_migration_resumes_without_loss() {
+        let att = crate::storage::TestDir::new();
+        let base = sled::Config::new().temporary(true).open().unwrap();
+        let db = Db::open(&base, &att.0, "old", &WriteLocks::default()).unwrap();
+        let mut digests = Vec::new();
+        for i in 0..50u32 {
+            // What v0.1.7 stored: bytes in sled under "sha256-<hex>", md5 indexed.
+            let bytes = format!("legacy attachment {i}").into_bytes();
+            let key = crate::attachments::content_key_for_tests(&bytes);
+            let md5 = crate::attachments::md5_digest(&bytes);
+            db.legacy_attachments.insert(key.as_bytes(), bytes.clone()).unwrap();
+            db.attachment_index.insert(md5.as_bytes(), key.as_bytes()).unwrap();
+            digests.push((md5, bytes));
+        }
+        // A crash after a file was renamed into place but before its sled
+        // copy was removed, and a crash mid-write (temp file left over).
+        let (first_md5, first_bytes) = &digests[0];
+        let first_hex = db.attachment_hex(first_md5).unwrap().unwrap();
+        db.blobs.put(&first_hex, first_bytes).unwrap();
+        std::fs::write(att.0.join("old").join(".tmp-interrupted"), b"half").unwrap();
+
+        // Interrupted partway: stop after 20 (as if killed).
+        let mut calls = 0;
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            db.migrate_legacy_attachments(10, |_, _| {
+                calls += 1;
+                if calls == 2 {
+                    panic!("killed");
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        assert_eq!(db.legacy_attachments.len(), 30, "the first 20 moved before the kill");
+        for (md5, bytes) in &digests {
+            assert_eq!(db.get_attachment(md5).unwrap().as_ref(), Some(bytes), "readable mid-migration");
+        }
+
+        let moved = db.migrate_legacy_attachments(10, |_, _| {}).unwrap();
+        assert_eq!(moved, 30);
+        assert_eq!(db.legacy_attachments.len(), 0);
+        for (md5, bytes) in &digests {
+            assert_eq!(db.get_attachment(md5).unwrap().as_ref(), Some(bytes), "lost {md5}");
+        }
+        db.compact_attachments(Duration::ZERO).unwrap();
+        let files = std::fs::read_dir(att.0.join("old")).unwrap().count();
+        assert_eq!(files, 0, "unreferenced and temp files are swept once no doc uses them");
     }
 
     /// A batch writes in one transaction but must behave like the same
@@ -722,8 +899,9 @@ mod tests {
     /// entry at its last write.
     #[test]
     fn a_batch_behaves_like_sequential_writes() {
+        let att = crate::storage::TestDir::new();
         let base = sled::Config::new().temporary(true).open().unwrap();
-        let db = Db::open(&base, "batch", &WriteLocks::default()).unwrap();
+        let db = Db::open(&base, &att.0, "batch", &WriteLocks::default()).unwrap();
         let feed = ChangeFeed::default();
         let ids = ["a", "b", "a", "c"];
         let results = db
@@ -752,8 +930,9 @@ mod tests {
     /// after its first write was committed must build on that write.
     #[test]
     fn a_batch_spanning_chunks_keeps_every_write() {
+        let att = crate::storage::TestDir::new();
         let base = sled::Config::new().temporary(true).open().unwrap();
-        let db = Db::open(&base, "chunks", &WriteLocks::default()).unwrap();
+        let db = Db::open(&base, &att.0, "chunks", &WriteLocks::default()).unwrap();
         let feed = ChangeFeed::default();
         let docs = BATCH_CHUNK + 22;
         let ids: Vec<String> = (0..2 * docs).map(|i| format!("d{}", i % docs)).collect();

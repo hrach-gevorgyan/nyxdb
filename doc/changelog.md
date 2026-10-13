@@ -5,6 +5,58 @@
 > `COUCHDB_CLONE_*` env var prefix (now `NYXDB_*`) — left as an honest
 > historical record rather than rewritten.
 
+## v0.1.8 (unreleased)
+
+Fixes for long-run problems found by auditing v0.1.7 inside Offlog, each
+confirmed by running the v0.1.7 binary. As before, every fix is
+test-first: the new test failed before the fix and fails again with the
+fix deliberately broken. New tests also watch resource behaviour (disk,
+memory) over time, not only correctness.
+
+**1. Attachment bytes are files, not sled values.** In v0.1.7 they lived
+in sled, which cost ~2.6× their size on disk and never gave it back
+(120 MB written → 314 MB), kept them in memory (sled's cache cap doesn't
+bound large values: 30 → 159 MB for 120 MB, freed only by a restart),
+couldn't free unreferenced blobs even after `POST /{db}/_compact`, and
+left a deleted database's bytes readable in its files.
+
+- One file per distinct content, named by its sha256, in one folder per
+  database: `<data>/att/<db>/<sha256>`. sled keeps only the md5 → sha256
+  index. Each file is written to a temp name, fsynced, renamed into
+  place, and the folder fsynced: a file with its final name is always
+  complete. Identical content is stored once.
+- Cleanup is mark and sweep: list every attachment referenced by any
+  stored revision of any doc (conflict leaves included), delete the
+  database's files not on the list, never one modified in the last hour
+  (it may belong to an upload whose revision isn't committed yet;
+  `NYXDB_ATTACHMENT_GRACE_SECS`), with the attachment write gate held
+  so no reference slips in between. Leftover temp files go too: at once
+  at startup if an earlier process left them, else after the hour. It
+  runs a minute after startup, then about daily when no request has
+  arrived for 5 minutes, and on `POST /{db}/_compact`.
+- `DELETE /{db}` deletes the database's attachment folder.
+- On first start, attachments written by v0.1.7 move from sled to files
+  in the background (reads fall back to sled until each has moved).
+  Resumable and safe to kill at any point: a sled copy is removed only
+  after its file is fsynced; a rerun skips what's done. Logged as
+  `moving N attachments of <db>…`, `migrated n/N…`, and
+  `attachment migration finished: N moved`.
+
+Measured: 20 MB of attachments used 46 MB on disk, 108 MB after
+replacing them and 123 MB after deleting every doc (both followed by
+`_compact`); now ~20 MB, ~20 MB and ~0. Writing 300 MB raised resident
+memory 100 → 330 MB; now 1 GB written and read back stays at ~30 MB.
+
+Tests: `test/att_disk` (replacing, deleting docs and deleting the
+database free disk; no attachment content left on disk after
+`DELETE /{db}`; 61 uploads during 73 back-to-back sweeps all survive,
+conflict branch included), `test/att_memory` (1 GB written and read,
+memory flat), `test/migration` (the real v0.1.7 binary writes the data;
+this build is killed twice mid-migration; everything reads back byte for
+byte, one file per content, no temp file left), unit tests for the sweep
+(conflict leaves kept; a write in progress is waited for; the age rule)
+and for an interrupted migration.
+
 ## v0.1.7
 
 Fixes from a read-only review of v0.1.6, in its priority order. Each

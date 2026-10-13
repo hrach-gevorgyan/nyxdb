@@ -9,6 +9,8 @@
 pub struct Limits {
     pub timeout: Option<std::time::Duration>,
     pub slots: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Records each request, so background sweeps can wait for idle time.
+    pub activity: std::sync::Arc<crate::maintenance::Activity>,
 }
 
 pub async fn limit_requests(
@@ -17,6 +19,7 @@ pub async fn limit_requests(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
+    limits.activity.touch();
     if request.uri().path().ends_with("/_changes") {
         return next.run(request).await;
     }

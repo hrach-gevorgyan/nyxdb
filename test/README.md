@@ -11,6 +11,14 @@
   ships). Both are installed by `npm install --prefix test/integration`.
 - `startup/` — startup failures exit with a clear message and code 2/3/4,
   never a panic. Spawns its own server.
+- `att_disk/` — own server: replacing attachments, deleting docs and
+  deleting the database free their disk space; uploads during
+  back-to-back sweeps all survive.
+- `att_memory/` — own server: 1 GB of attachments written and read back,
+  memory stays flat.
+- `migration/` — the real v0.1.7 binary (`NYXDB_OLD_BIN`; `run_all.js`
+  builds it from the tag) writes attachments; this build is killed twice
+  mid-migration; nothing is lost.
 - `memory/` — memory stays bounded while ~100 MB of small docs are
   written and read back. Spawns its own server.
 - `blocking/` — `GET /` stays fast while many full `_changes` scans run.
@@ -76,7 +84,8 @@ POUCHDB=9 node test/integration/live_sync.js   # PouchDB-driven suites: pick 8 (
 setting (either works; default `testuser`/`testpass`).
 
 Suites that spawn their own server need the release binary (or
-`NYXDB_BIN`) and use these ports: startup 8297, memory 8295, durability
+`NYXDB_BIN`) and use these ports: startup 8297, memory 8295, att_memory 8289, att_disk 8291,
+migration 8287, durability
 8299, ops 8292, checkpoint_resume 8298, large_batches 8294.
 
 Need a real CouchDB (not run by `run_all.js` or CI):

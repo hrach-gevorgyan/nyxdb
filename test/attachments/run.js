@@ -340,7 +340,9 @@ async function testMissingStub() {
 
 // Replaced attachments used to stay on disk forever. POST /{db}/_compact
 // deletes bytes no revision refers to; current and conflicting-branch
-// attachments must survive it.
+// attachments must survive it. Needs a server started with
+// NYXDB_ATTACHMENT_GRACE_SECS=0 (run_all.js does), else the replaced
+// bytes are rightly kept for an hour.
 async function testCompactCollectsReplacedAttachments() {
   const db = "att_gc_" + Date.now();
   await req(db, "PUT", "");

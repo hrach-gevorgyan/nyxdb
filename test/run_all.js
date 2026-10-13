@@ -25,6 +25,9 @@ const PORT = Number(process.env.RUN_ALL_PORT || 8281);
 const SUITES = [
   "test/startup/run.js",
   "test/memory/run.js",
+  "test/att_memory/run.js",
+  "test/att_disk/run.js",
+  "test/migration/run.js",
   "test/blocking/run.js",
   "test/durability/run.js",
   "test/ops/run.js",
@@ -94,8 +97,32 @@ function runSuite(file, env) {
   });
 }
 
+/// The v0.1.7 binary, for the upgrade test (test/migration): built once
+/// from the v0.1.7 tag into target/compat and reused after that.
+function oldBinary() {
+  const exe = process.platform === "win32" ? "nyxdb.exe" : "nyxdb";
+  const out = path.join(REPO, "target", "compat", "v0.1.7", exe);
+  if (fs.existsSync(out)) return out;
+  const src = path.join(REPO, "target", "compat", "src-v0.1.7");
+  const git = (...args) => spawnSync("git", args, { cwd: REPO, encoding: "utf8" });
+  if (!fs.existsSync(src)) {
+    const added = git("worktree", "add", "--detach", src, "v0.1.7");
+    if (added.status !== 0) throw new Error(`can't check out v0.1.7 (fetch the tags?): ${added.stderr}`);
+  }
+  const built = spawnSync("cargo", ["build", "--release", "--manifest-path", path.join(src, "db", "Cargo.toml"), "--target-dir", path.join(REPO, "target", "compat", "build")], {
+    cwd: REPO,
+    encoding: "utf8",
+  });
+  if (built.status !== 0) throw new Error(`building v0.1.7 failed: ${built.stderr.slice(-2000)}`);
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.copyFileSync(path.join(REPO, "target", "compat", "build", "release", exe), out);
+  git("worktree", "remove", "--force", src);
+  return out;
+}
+
 async function suites(server) {
   const env = {
+    NYXDB_OLD_BIN: selected(SUITES).includes("test/migration/run.js") ? oldBinary() : "",
     SERVER_URL: server.url,
     OUR_USER: "runall",
     OUR_PASSWORD: "runall-pass",
@@ -111,7 +138,12 @@ async function suites(server) {
       const started = Date.now();
       const { code, out } = await runSuite(file, { ...env, ...extra });
       record(label + file, code === 0, `${((Date.now() - started) / 1000).toFixed(1)} s`);
-      if (code !== 0) console.log(out.trim().split("\n").slice(-12).map((l) => "      " + l).join("\n"));
+      if (code !== 0) {
+        // Every FAIL/ERROR line, wherever it is, plus the last few lines.
+        const lines = out.trim().split("\n");
+        const shown = [...new Set([...lines.filter((l) => /^(FAIL|ERROR)/.test(l)), ...lines.slice(-4)])];
+        console.log(shown.map((l) => "      " + l).join("\n"));
+      }
     }
   }
 }
@@ -121,7 +153,15 @@ async function main() {
   if (rust && !rustChecks()) return;
   const logFile = path.join(os.tmpdir(), `nyxdb-run-all-${process.pid}.log`);
   const log = fs.openSync(logFile, "w");
-  const server = await spawnServer({ port: PORT, user: "runall", password: "runall-pass", stdio: ["ignore", log, log] });
+  // Grace 0: suites check that _compact frees replaced attachments right
+  // away; the one-hour default is covered by unit tests.
+  const server = await spawnServer({
+    port: PORT,
+    user: "runall",
+    password: "runall-pass",
+    stdio: ["ignore", log, log],
+    env: { NYXDB_ATTACHMENT_GRACE_SECS: "0" },
+  });
   try {
     await suites(server);
   } finally {

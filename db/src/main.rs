@@ -94,9 +94,8 @@ async fn main() {
     // server touched (measured with 100 MB of small docs: ~195 MB resident
     // after writing, ~163 MB after reading it back). sled's accounting
     // undercounts real memory by roughly 2x, so 32 MB of cache keeps the
-    // same workload under ~120 MB (see test/memory). NYXDB_CACHE_MB to
-    // tune. Known limit: in sled 0.34 the cap doesn't bound *large* values
-    // (~1 MB each); memory then tracks the data touched — doc/USAGE.md.
+    // same workload around ~105 MB (see test/memory). NYXDB_CACHE_MB to
+    // tune. Attachment bytes are files and never enter this cache.
     let cache_mb: u64 = match std::env::var("NYXDB_CACHE_MB") {
         Err(_) => 32,
         Ok(v) => match v.parse() {
@@ -139,14 +138,22 @@ async fn main() {
             .unwrap_or_else(|_| fail(EXIT_CONFIG, &format!("NYXDB_MAX_BODY_BYTES must be a number of bytes, got {v:?}"))),
     };
 
-    let app = build_router(AppState {
+    // Attachment bytes are files under <data>/att (one folder per
+    // database); a file younger than the grace period is never swept, as
+    // its revision may not be committed yet. Tests shorten it.
+    let attachment_grace = std::time::Duration::from_secs(env_number("NYXDB_ATTACHMENT_GRACE_SECS", 3600));
+    let state = AppState {
         root,
         feeds: ChangeFeedRegistry::default(),
         creds: Arc::new(creds),
         server_uuid: Arc::from(server_uuid),
         locks: nyxdb::storage::WriteLocks::default(),
-    })
-        .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes));
+        att_root: Arc::new(Path::new(&data_dir).join("att")),
+        attachment_grace,
+    };
+    let activity = Arc::new(nyxdb::maintenance::Activity::default());
+    nyxdb::maintenance::spawn(state.clone(), activity.clone());
+    let app = build_router(state).layer(axum::extract::DefaultBodyLimit::max(max_body_bytes));
     // Generous defaults: 300 s fits a 256 MB upload at under 1 MB/s, and
     // 512 requests in progress is far beyond what a few syncing devices
     // need. 0 turns the timeout off.
@@ -158,6 +165,7 @@ async fn main() {
     let limits = nyxdb::limits::Limits {
         timeout: (timeout_secs > 0).then(|| std::time::Duration::from_secs(timeout_secs)),
         slots: Arc::new(tokio::sync::Semaphore::new(slots as usize)),
+        activity,
     };
     let mut app = app.layer(axum::middleware::from_fn_with_state(limits, nyxdb::limits::limit_requests)).layer(TraceLayer::new_for_http());
     // CORS must wrap auth (outermost), not the other way round: tower_http's

@@ -36,8 +36,9 @@ All resolved. Kept as a record of the decision and reasoning, since
 - [x] `axum` vs `actix-web` — decided: axum. No reason found to revisit.
 - [x] `sled` vs `rusqlite` — decided: sled, for embedded simplicity.
       Since v0.1.7 a doc's tree and its `_changes` entry are written in
-      one sled transaction. Known limit: sled 0.34's cache cap doesn't
-      bound large values (attachments); see `roadmap.md` Next.
+      one sled transaction. Since v0.1.8 attachment bytes are files, not
+      sled values (sled's cache cap doesn't bound large values, and it
+      never gave their disk space back).
 - [x] Hash function for revision ids — decided: SHA-256 truncated.
       Byte-for-byte CouchDB compatibility was never a goal (see
       `USAGE.md` §7) — `new_edits:false` pushes carry the client's own

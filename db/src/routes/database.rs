@@ -21,7 +21,7 @@ pub(super) fn create_db_blocking(state: &AppState, db_name: &str) -> Result<Json
     if crate::storage::db_exists(&state.root, &db_name) {
         return Err(ApiError(StatusCode::PRECONDITION_FAILED, "file_exists", "The database could not be created, the file already exists."));
     }
-    Db::open(&state.root, &db_name, &state.locks).map_err(|_| internal_error())?;
+    Db::open(&state.root, &state.att_root, &db_name, &state.locks).map_err(|_| internal_error())?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -159,14 +159,18 @@ pub(super) async fn all_docs_keys(
     })
 }
 
-/// `POST /{db}/_compact` — deletes attachment bytes no stored revision
-/// refers to any more (see `Db::compact_attachments`). CouchDB answers
-/// 202 and compacts in the background; this runs to completion first.
+/// `POST /{db}/_compact` — deletes attachment files no stored revision
+/// refers to any more (see `Db::compact_attachments`); the same sweep also
+/// runs on its own (`crate::maintenance`). CouchDB answers 202 and
+/// compacts in the background; this runs to completion first.
 pub(super) async fn compact(State(state): State<AppState>, Path(db_name): Path<String>) -> Result<Response, ApiError> {
     blocking(|| {
         let db = state.db(&db_name)?;
-        let removed = db.compact_attachments().map_err(|_| internal_error())?;
-        tracing::info!("compacted {db_name}: {removed} unreferenced attachment(s) deleted");
+        let swept = db.compact_attachments(state.attachment_grace).map_err(|e| {
+            tracing::error!("compacting {db_name}: {e}");
+            internal_error()
+        })?;
+        tracing::info!("compacted {db_name}: {} attachment file(s), {} bytes, {} temp file(s) deleted", swept.files, swept.bytes, swept.temp_files);
         Ok((StatusCode::ACCEPTED, Json(json!({"ok": true}))).into_response())
     })
 }
@@ -175,7 +179,8 @@ pub(super) async fn compact(State(state): State<AppState>, Path(db_name): Path<S
 /// PouchDB client never calls this against a remote it's syncing with),
 /// but a reasonable, low-risk admin operation to support — mainly useful
 /// for test/dev hygiene (tearing down disposable databases) rather than
-/// anything client-driven sync depends on.
+/// anything client-driven sync depends on. Deletes the database's
+/// attachment folder too: its bytes must not stay readable on disk.
 pub(super) async fn delete_db(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
@@ -184,8 +189,17 @@ pub(super) async fn delete_db(
         if !crate::storage::db_exists(&state.root, &db_name) {
             return Err(db_not_found());
         }
-        for suffix in ["docs", "local", "seq", "seqidx", "attachments", "attmd5"] {
-            state.root.drop_tree(format!("{db_name}::{suffix}")).map_err(|_| internal_error())?;
+        let db = Db::open(&state.root, &state.att_root, &db_name, &state.locks).map_err(|_| internal_error())?;
+        {
+            // No upload can be storing a file in the folder while it goes.
+            let _gate = db.attachment_writer();
+            for suffix in ["docs", "local", "seq", "seqidx", "attachments", "attmd5"] {
+                state.root.drop_tree(format!("{db_name}::{suffix}")).map_err(|_| internal_error())?;
+            }
+            db.remove_attachment_files().map_err(|e| {
+                tracing::error!("deleting the attachment folder of {db_name}: {e}");
+                internal_error()
+            })?;
         }
         Ok(Json(json!({"ok": true})))
     })

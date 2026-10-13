@@ -43,6 +43,11 @@ pub struct AppState {
     pub server_uuid: Arc<str>,
     /// Per-database write locks — see `Db::update_tree`.
     pub locks: WriteLocks,
+    /// `<data>/att`: one folder of attachment files per database.
+    pub att_root: Arc<std::path::PathBuf>,
+    /// An attachment file younger than this is never swept (it may belong
+    /// to an upload whose revision isn't committed yet).
+    pub attachment_grace: Duration,
 }
 
 impl AppState {
@@ -55,7 +60,7 @@ impl AppState {
             if !crate::storage::db_exists(&self.root, name) {
                 return Err(db_not_found());
             }
-            Db::open(&self.root, name, &self.locks).map_err(|_| internal_error())
+            Db::open(&self.root, &self.att_root, name, &self.locks).map_err(|_| internal_error())
         })
     }
 }

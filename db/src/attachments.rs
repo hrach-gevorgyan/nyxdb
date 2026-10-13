@@ -31,6 +31,11 @@ fn content_key(bytes: &[u8]) -> String {
     format!("sha256-{:x}", Sha256::digest(bytes))
 }
 
+#[cfg(test)]
+pub(crate) fn content_key_for_tests(bytes: &[u8]) -> String {
+    content_key(bytes)
+}
+
 /// CouchDB/PouchDB-style digest, as exposed in stubs.
 pub fn md5_digest(bytes: &[u8]) -> String {
     format!("md5-{}", base64::engine::general_purpose::STANDARD.encode(Md5::digest(bytes)))
@@ -152,11 +157,12 @@ mod tests {
     /// digest. They must still resolve, and go out as md5.
     #[test]
     fn legacy_sha256_stubs_still_resolve_and_are_shown_as_md5() {
+        let att = crate::storage::TestDir::new();
         let base = sled::Config::new().temporary(true).open().unwrap();
-        let db = Db::open(&base, "legacy", &WriteLocks::default()).unwrap();
+        let db = Db::open(&base, &att.0, "legacy", &WriteLocks::default()).unwrap();
         let bytes = b"written by v0.1.6";
         let legacy = content_key(bytes);
-        db.attachments.insert(legacy.as_bytes(), &bytes[..]).unwrap();
+        db.legacy_attachments.insert(legacy.as_bytes(), &bytes[..]).unwrap();
 
         assert!(db.has_attachment(&legacy).unwrap());
         let mut body = json!({"_attachments": {"f": {"stub": true, "digest": legacy, "length": bytes.len()}}});

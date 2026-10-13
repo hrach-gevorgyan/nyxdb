@@ -72,9 +72,9 @@ pub(super) async fn put_attachment(
 }
 
 /// `DELETE /{db}/{id}/{attname}` — remove a single attachment, creating
-/// a new revision without it. The attachment's bytes stay in storage
-/// (content-addressed, might be referenced by an earlier revision still
-/// in the tree) — only the current body's reference to it is removed.
+/// a new revision without it. Only the current body's reference is
+/// removed here; the file goes at the next attachment sweep if no other
+/// revision refers to it (`Db::compact_attachments`).
 pub(super) async fn delete_attachment(
     State(state): State<AppState>,
     Path((db_name, id, attname)): Path<(String, String, String)>,

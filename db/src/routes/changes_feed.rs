@@ -267,8 +267,9 @@ mod tests {
     /// move past a change it never got.
     #[test]
     fn changes_reports_an_unreadable_doc_instead_of_dropping_it() {
+        let att = crate::storage::TestDir::new();
         let base = sled::Config::new().temporary(true).open().unwrap();
-        let db = Db::open(&base, "bad", &WriteLocks::default()).unwrap();
+        let db = Db::open(&base, &att.0, "bad", &WriteLocks::default()).unwrap();
         let feed = ChangeFeed::default();
         for id in ["a", "b"] {
             db.update_tree(id, &feed, |tree| tree.insert_revision_chain(&["1-a".to_string()], false, json!({})))
@@ -284,8 +285,9 @@ mod tests {
     /// default) for a change that had already happened.
     #[tokio::test]
     async fn longpoll_sees_a_write_landing_right_after_its_storage_check() {
+        let att = crate::storage::TestDir::new();
         let base = sled::Config::new().temporary(true).open().unwrap();
-        let db = Db::open(&base, "lp", &WriteLocks::default()).unwrap();
+        let db = Db::open(&base, &att.0, "lp", &WriteLocks::default()).unwrap();
         let feed = ChangeFeed::default();
         let started = std::time::Instant::now();
         let woke = wait_for_change(&db, &feed, 0, Duration::from_secs(3), || {

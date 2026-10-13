@@ -1,7 +1,9 @@
 pub mod attachments;
 pub mod auth;
+pub mod blobs;
 pub mod changes;
 pub mod limits;
+pub mod maintenance;
 pub mod revtree;
 pub mod routes;
 pub mod storage;

@@ -14,9 +14,7 @@
 // arenas), so an absolute limit tuned on one fails on the other. A
 // generous ceiling is checked too.
 //
-// Known limit, documented rather than tested: in sled 0.34 the cap does
-// not bound *large* values (~1 MB each) — memory then tracks the data
-// touched regardless of the cap. See doc/USAGE.md.
+// Attachments (files since v0.1.8) are covered by test/att_memory.
 //
 // Requires a built binary: NYXDB_BIN (default target/release/nyxdb[.exe]).
 
