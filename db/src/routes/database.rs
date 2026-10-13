@@ -32,15 +32,8 @@ pub(super) async fn db_info(
     blocking(|| {
         let db = state.db(&db_name)?;
         // CouchDB's `doc_count` is live docs only; tombstones are counted
-        // separately. This scans every tree — fine at this server's scale.
-        let (mut live, mut deleted) = (0u64, 0u64);
-        for id in db.doc_ids().map_err(|_| internal_error())? {
-            match winner_state(&db, &id)? {
-                Some((_, false)) => live += 1,
-                Some((_, true)) => deleted += 1,
-                None => {}
-            }
-        }
+        // separately. Both are kept up to date by every write.
+        let (live, deleted) = db.doc_counts().map_err(|_| internal_error())?;
         let update_seq = db.current_seq().map_err(|_| internal_error())?;
         Ok(Json(json!({
             "db_name": db_name,
@@ -52,10 +45,9 @@ pub(super) async fn db_info(
     })
 }
 
-/// A doc's winning rev and whether it is a tombstone.
+/// A doc's winning rev and whether it is a tombstone (from the index).
 pub(super) fn winner_state(db: &Db, id: &str) -> Result<Option<(String, bool)>, ApiError> {
-    let Some(tree) = db.get_tree(id).map_err(|_| internal_error())? else { return Ok(None) };
-    Ok(tree.winner().map(|rev| (rev.to_string(), tree.nodes[rev].deleted)))
+    db.winner(id).map_err(|_| internal_error())
 }
 
 #[derive(serde::Deserialize)]
@@ -99,7 +91,8 @@ pub(super) fn all_docs_row(db: &Db, id: &str, rev: &str, include_docs: bool) -> 
 
 /// `GET /{db}/_all_docs` — live docs in id order (tombstones left out),
 /// with CouchDB's inclusive `startkey`/`endkey`, `descending`, `skip`,
-/// `limit` and `include_docs`.
+/// `limit` and `include_docs`. A range scan of the winners index that
+/// stops at `limit`; only `include_docs` reads the returned docs.
 pub(super) async fn all_docs(
     State(state): State<AppState>,
     Path(db_name): Path<String>,
@@ -108,29 +101,14 @@ pub(super) async fn all_docs(
     blocking(|| {
         let db = state.db(&db_name)?;
         let (start, end) = (json_key(params.startkey.as_deref())?, json_key(params.endkey.as_deref())?);
-        let mut live = Vec::new();
-        for id in db.doc_ids().map_err(|_| internal_error())? {
-            if let Some((rev, false)) = winner_state(&db, &id)? {
-                live.push((id, rev));
-            }
-        }
-        let total_rows = live.len();
-        if params.descending {
-            live.reverse();
-        }
-        // With `descending`, startkey is the high end and endkey the low.
-        let in_range = |id: &str| {
-            let (lo, hi) = if params.descending { (&end, &start) } else { (&start, &end) };
-            lo.as_deref().is_none_or(|lo| id >= lo) && hi.as_deref().is_none_or(|hi| id <= hi)
-        };
-        let rows = live
+        let (page, offset) = db
+            .live_docs_page(start.as_deref(), end.as_deref(), params.descending, params.skip, params.limit.unwrap_or(usize::MAX))
+            .map_err(|_| internal_error())?;
+        let rows = page
             .iter()
-            .filter(|(id, _)| in_range(id))
-            .skip(params.skip)
-            .take(params.limit.unwrap_or(usize::MAX))
             .map(|(id, rev)| all_docs_row(&db, id, rev, params.include_docs))
             .collect::<Result<Vec<_>, _>>()?;
-        let offset = live.iter().take_while(|(id, _)| !in_range(id)).count() + params.skip;
+        let (total_rows, _) = db.doc_counts().map_err(|_| internal_error())?;
         Ok(Json(json!({"total_rows": total_rows, "offset": offset, "rows": rows})))
     })
 }
@@ -154,7 +132,7 @@ pub(super) async fn all_docs_keys(
                 Some((rev, false)) => all_docs_row(&db, id, &rev, params.include_docs)?,
             });
         }
-        let total_rows = db.doc_ids().map_err(|_| internal_error())?.len();
+        let (total_rows, _) = db.doc_counts().map_err(|_| internal_error())?;
         Ok(Json(json!({"total_rows": total_rows, "offset": 0, "rows": rows})))
     })
 }
@@ -193,7 +171,7 @@ pub(super) async fn delete_db(
         {
             // No upload can be storing a file in the folder while it goes.
             let _gate = db.attachment_writer();
-            for suffix in ["docs", "local", "seq", "seqidx", "attachments", "attmd5"] {
+            for suffix in ["docs", "local", "seq", "seqidx", "winners", "meta", "attachments", "attmd5"] {
                 state.root.drop_tree(format!("{db_name}::{suffix}")).map_err(|_| internal_error())?;
             }
             db.remove_attachment_files().map_err(|e| {

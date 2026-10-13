@@ -80,6 +80,22 @@ after the idle timeout, the cap, and a heartbeat longpoll, a 6 s longpoll
 and a silent continuous feed all outliving both timeouts), unit tests
 for the expiry rule, SO_KEEPALIVE and the exemption.
 
+**3. `GET /{db}` and `_all_docs` no longer read every document.** Both
+parsed every doc and tombstone ever written, on every call: at 50,000
+docs ~65 ms each, 20× their time at 2,500. Each write now updates, in
+its own transaction, a winners index (doc id → winning rev, deleted
+flag) and the live/deleted counts. `GET /{db}` reads the counts;
+`_all_docs` is a range scan of the index that stops at `limit` and
+parses only returned docs, and only for `include_docs`; `POST _all_docs`
+looks each key up in the index. Existing databases get the index built
+once, on first open. (With a `startkey`, `offset` still counts the live
+docs before it — an index walk, no parsing.) Tests: `test/scale` (at most
+3× slower at 50,000 docs than at 2,500, correct counts and rows; the
+v0.1.7 binary fails it), a unit test that the counts and index match the
+trees after creates, updates, deletes, recreates, conflicts with a
+deleted branch, batches repeating an id across chunks, a reopen, and a
+rebuild for an old database.
+
 ## v0.1.7
 
 Fixes from a read-only review of v0.1.6, in its priority order. Each

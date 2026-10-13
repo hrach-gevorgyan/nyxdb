@@ -130,6 +130,28 @@ impl TryFrom<StoredTree> for RevTree {
 /// Most docs `Db::try_update_trees` writes in one transaction.
 const BATCH_CHUNK: usize = 128;
 
+/// Keys of the per-database `meta` tree: live and deleted doc counts.
+const LIVE: &[u8] = b"doc_count";
+const DELETED: &[u8] = b"doc_del_count";
+
+fn read_count(value: Option<sled::IVec>) -> u64 {
+    value.and_then(|v| v.as_ref().try_into().ok()).map(u64::from_be_bytes).unwrap_or(0)
+}
+
+/// A winners-index value: `[deleted flag][winning rev]`.
+fn encode_winner(rev: &str, deleted: bool) -> Vec<u8> {
+    let mut value = Vec::with_capacity(1 + rev.len());
+    value.push(deleted as u8);
+    value.extend_from_slice(rev.as_bytes());
+    value
+}
+
+fn decode_winner(value: &[u8]) -> StorageResult<(String, bool)> {
+    let (&flag, rev) = value.split_first().ok_or_else(|| StorageError::Corrupt("empty winners entry".into()))?;
+    let rev = String::from_utf8(rev.to_vec()).map_err(|e| StorageError::Corrupt(format!("winners entry: {e}")))?;
+    Ok((rev, flag == 1))
+}
+
 /// One write lock per database, shared across requests (a `Db` is opened
 /// fresh per request, so the lock has to live somewhere longer-lived —
 /// `AppState`). See `Db::update_tree` for why it exists.
@@ -173,6 +195,13 @@ pub struct Db {
     /// previous `seq_log` entry: one `_changes` entry per doc, not one per
     /// write (see `put_tree`).
     seq_by_doc: sled::Tree,
+    /// doc id → `[deleted flag][winning rev]`, kept in each write's
+    /// transaction, so `_all_docs` and `POST _all_docs` read it instead of
+    /// parsing every revision tree.
+    pub(crate) winners: sled::Tree,
+    /// Live and deleted doc counts (`GET /{db}`), kept in each write's
+    /// transaction.
+    pub(crate) meta: sled::Tree,
     /// Attachment bytes as files, one per distinct content, named by its
     /// sha256 — content-addressed, so identical content is stored once
     /// however many revisions refer to it. Document bodies hold only a
@@ -202,13 +231,98 @@ impl Db {
             local: base.open_tree(format!("{name}::local"))?,
             seq_log: base.open_tree(format!("{name}::seq"))?,
             seq_by_doc: base.open_tree(format!("{name}::seqidx"))?,
+            winners: base.open_tree(format!("{name}::winners"))?,
+            meta: base.open_tree(format!("{name}::meta"))?,
             legacy_attachments: base.open_tree(format!("{name}::attachments"))?,
             attachment_index: base.open_tree(format!("{name}::attmd5"))?,
         };
         if db.seq_by_doc.is_empty() && !db.seq_log.is_empty() {
             db.migrate_seq_index()?;
         }
+        if db.meta.is_empty() && !db.docs.is_empty() {
+            db.build_winners_index()?;
+        }
         Ok(db)
+    }
+
+    /// One-time upgrade for databases written before v0.1.8: builds the
+    /// winners index and the counts from the trees.
+    fn build_winners_index(&self) -> StorageResult<()> {
+        let _guard = self.write_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.meta.is_empty() {
+            return Ok(()); // another request built it while we waited
+        }
+        let (mut live, mut deleted) = (0u64, 0u64);
+        let mut batch = sled::Batch::default();
+        for id in self.doc_ids()? {
+            let Some(tree) = self.get_tree(&id)? else { continue };
+            let Some(rev) = tree.winner() else { continue };
+            let is_deleted = tree.nodes[rev].deleted;
+            if is_deleted { deleted += 1 } else { live += 1 }
+            batch.insert(id.as_bytes(), encode_winner(rev, is_deleted));
+        }
+        self.winners.apply_batch(batch)?;
+        // Counts last: their presence marks the index complete.
+        self.meta.insert(DELETED, &deleted.to_be_bytes())?;
+        self.meta.insert(LIVE, &live.to_be_bytes())?;
+        self.base.flush()?;
+        Ok(())
+    }
+
+    /// Live and deleted doc counts.
+    pub fn doc_counts(&self) -> StorageResult<(u64, u64)> {
+        Ok((read_count(self.meta.get(LIVE)?), read_count(self.meta.get(DELETED)?)))
+    }
+
+    /// A doc's winning rev and whether it is deleted, from the index.
+    pub fn winner(&self, doc_id: &str) -> StorageResult<Option<(String, bool)>> {
+        self.winners.get(doc_id)?.map(|v| decode_winner(&v)).transpose()
+    }
+
+    /// `_all_docs` page: live docs in id order (reverse if `descending`),
+    /// from `start` to `end` inclusive (in the scan's direction), after
+    /// skipping `skip`, at most `limit`. Reads the winners index only and
+    /// stops at `limit`. Also returns `offset`: how many live docs precede
+    /// the first returned row (counted only when `start` is given).
+    #[allow(clippy::type_complexity)]
+    pub fn live_docs_page(
+        &self,
+        start: Option<&str>,
+        end: Option<&str>,
+        descending: bool,
+        skip: usize,
+        limit: usize,
+    ) -> StorageResult<(Vec<(String, String)>, u64)> {
+        type Entry = sled::Result<(sled::IVec, sled::IVec)>;
+        let live = |entry: Entry| -> Option<StorageResult<(String, String)>> {
+            match entry {
+                Err(e) => Some(Err(e.into())),
+                Ok((id, value)) => match decode_winner(&value) {
+                    Err(e) => Some(Err(e)),
+                    Ok((_, true)) => None,
+                    Ok((rev, false)) => Some(Ok((String::from_utf8_lossy(&id).into_owned(), rev))),
+                },
+            }
+        };
+        let (lo, hi) = if descending { (end, start) } else { (start, end) };
+        let range = match (lo, hi) {
+            (Some(lo), Some(hi)) if lo > hi => return Ok((Vec::new(), 0)),
+            (Some(lo), Some(hi)) => self.winners.range(lo..=hi),
+            (Some(lo), None) => self.winners.range(lo..),
+            (None, Some(hi)) => self.winners.range(..=hi),
+            (None, None) => self.winners.iter(),
+        };
+        let rows: Vec<(String, String)> = if descending {
+            range.rev().filter_map(live).skip(skip).take(limit).collect::<StorageResult<_>>()?
+        } else {
+            range.filter_map(live).skip(skip).take(limit).collect::<StorageResult<_>>()?
+        };
+        let before = match start {
+            None => 0,
+            Some(start) if descending => self.winners.range(start..).filter_map(live).filter(|r| r.as_ref().is_ok_and(|(id, _)| id.as_str() > start)).count(),
+            Some(start) => self.winners.range(..start).filter_map(live).count(),
+        };
+        Ok((rows, (before + skip) as u64))
     }
 
     /// One-time upgrade for databases written before v0.1.7, whose
@@ -507,6 +621,9 @@ impl Db {
     /// pulls it). Each doc's previous `_changes` entry is removed in the
     /// same transaction: one entry per doc, so `seq_log` is bounded by the
     /// doc count instead of growing with every write.
+    ///
+    /// The doc's entry in the winners index and the live/deleted counters
+    /// are updated in the same transaction (see `winner`, `doc_counts`).
     fn put_trees(&self, writes: &[(&str, RevTree, u64)]) -> StorageResult<()> {
         let encoded = writes
             .iter()
@@ -516,18 +633,29 @@ impl Db {
                 let bytes = bincode_options()
                     .serialize(&stored)
                     .map_err(|e| StorageError::Corrupt(format!("failed to encode revtree for {doc_id:?}: {e}")))?;
-                Ok((*doc_id, bytes, *seq))
+                let winner = tree.winner().map(|rev| encode_winner(rev, tree.nodes[rev].deleted));
+                Ok((*doc_id, bytes, *seq, winner))
             })
             .collect::<StorageResult<Vec<_>>>()?;
-        (&self.docs, &self.seq_log, &self.seq_by_doc)
-            .transaction(|(docs, seq_log, seq_by_doc)| -> Result<(), ConflictableTransactionError<()>> {
-                for (doc_id, bytes, seq) in &encoded {
+        (&self.docs, &self.seq_log, &self.seq_by_doc, &self.winners, &self.meta)
+            .transaction(|(docs, seq_log, seq_by_doc, winners, meta)| -> Result<(), ConflictableTransactionError<()>> {
+                let (mut live, mut deleted) = (read_count(meta.get(LIVE)?), read_count(meta.get(DELETED)?));
+                for (doc_id, bytes, seq, winner) in &encoded {
                     docs.insert(doc_id.as_bytes(), bytes.as_slice())?;
                     if let Some(previous) = seq_by_doc.insert(doc_id.as_bytes(), &seq.to_be_bytes())? {
                         seq_log.remove(previous.as_ref())?;
                     }
                     seq_log.insert(&seq.to_be_bytes(), doc_id.as_bytes())?;
+                    let Some(winner) = winner else { continue };
+                    match winners.insert(doc_id.as_bytes(), winner.as_slice())?.map(|old| old.first() == Some(&1)) {
+                        Some(true) => deleted -= 1,
+                        Some(false) => live -= 1,
+                        None => {}
+                    }
+                    if winner[0] == 1 { deleted += 1 } else { live += 1 }
                 }
+                meta.insert(LIVE, &live.to_be_bytes())?;
+                meta.insert(DELETED, &deleted.to_be_bytes())?;
                 Ok(())
             })
             .map_err(|e| match e {
@@ -891,6 +1019,88 @@ mod tests {
         db.compact_attachments(Duration::ZERO).unwrap();
         let files = std::fs::read_dir(att.0.join("old")).unwrap().count();
         assert_eq!(files, 0, "unreferenced and temp files are swept once no doc uses them");
+    }
+
+    /// What the counters and the winners index must say, computed the slow
+    /// way: by reading every tree.
+    fn counted_from_trees(db: &Db) -> (u64, u64, Vec<(String, String, bool)>) {
+        let (mut live, mut deleted, mut winners) = (0, 0, Vec::new());
+        for id in db.doc_ids().unwrap() {
+            let tree = db.get_tree(&id).unwrap().unwrap();
+            let rev = tree.winner().unwrap().clone();
+            let is_deleted = tree.nodes[&rev].deleted;
+            if is_deleted { deleted += 1 } else { live += 1 }
+            winners.push((id, rev, is_deleted));
+        }
+        (live, deleted, winners)
+    }
+
+    fn indexed(db: &Db) -> (u64, u64, Vec<(String, String, bool)>) {
+        let (live, deleted) = db.doc_counts().unwrap();
+        let winners = db
+            .doc_ids()
+            .unwrap()
+            .into_iter()
+            .map(|id| {
+                let (rev, is_deleted) = db.winner(&id).unwrap().unwrap();
+                (id, rev, is_deleted)
+            })
+            .collect();
+        (live, deleted, winners)
+    }
+
+    /// `GET /{db}` and `_all_docs` used to parse every doc and tombstone
+    /// ever written. Counts and each doc's winner are now kept up to date
+    /// in the write transaction; they must match the trees after every
+    /// kind of write, after a reopen, and after rebuilding them for a
+    /// database written before they existed.
+    #[test]
+    fn counts_and_winners_follow_every_kind_of_write() {
+        let att = crate::storage::TestDir::new();
+        let base = sled::Config::new().temporary(true).open().unwrap();
+        let locks = WriteLocks::default();
+        let db = Db::open(&base, &att.0, "counts", &locks).unwrap();
+        let feed = ChangeFeed::default();
+        let chain = |revs: &[&str]| revs.iter().map(|r| r.to_string()).collect::<Vec<_>>();
+        let put = |id: &str, revs: &[&str], deleted: bool| {
+            db.update_tree(id, &feed, |tree| tree.insert_revision_chain(&chain(revs), deleted, json!({}))).unwrap();
+        };
+        assert_eq!(indexed(&db), (0, 0, vec![]));
+        put("a", &["1-a"], false);
+        put("b", &["1-b"], false);
+        put("c", &["1-c"], false);
+        put("a", &["2-a", "1-a"], false); // update
+        put("b", &["2-b", "1-b"], true); // delete
+        put("c", &["2-x", "1-c"], false); // conflict: two live leaves
+        put("c", &["2-y", "1-c"], true); // a deleted branch: c stays live
+        assert_eq!(indexed(&db), counted_from_trees(&db));
+        assert_eq!(db.doc_counts().unwrap(), (2, 1));
+        put("c", &["3-x", "2-x", "1-c"], true); // every leaf deleted now
+        put("b", &["3-b", "2-b", "1-b"], false); // recreated
+        assert_eq!(db.doc_counts().unwrap(), (2, 1));
+        // A batch touching one doc twice, across a chunk boundary too.
+        let ids: Vec<String> = (0..BATCH_CHUNK + 10).map(|i| format!("n{}", i % (BATCH_CHUNK - 3))).collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        db.try_update_trees(&id_refs, &feed, |i, tree| {
+            let parent = tree.winner().cloned();
+            let gen = parent.as_ref().map_or(1, |_| 2);
+            tree.nodes.insert(format!("{gen}-{i}"), RevNode { parent, deleted: i % 2 == 0, body: json!({}) });
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert_eq!(indexed(&db), counted_from_trees(&db));
+
+        drop(db);
+        let db = Db::open(&base, &att.0, "counts", &locks).unwrap();
+        assert_eq!(indexed(&db), counted_from_trees(&db), "kept across a reopen");
+
+        // A database written before the index existed gets it built on open.
+        let expected = counted_from_trees(&db);
+        db.winners.clear().unwrap();
+        db.meta.clear().unwrap();
+        drop(db);
+        let db = Db::open(&base, &att.0, "counts", &locks).unwrap();
+        assert_eq!(indexed(&db), expected, "rebuilt for an old database");
     }
 
     /// A batch writes in one transaction but must behave like the same

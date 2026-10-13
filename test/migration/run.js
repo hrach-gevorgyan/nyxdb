@@ -116,6 +116,13 @@ async function main() {
         if (r.status !== 200 || sha(r.bytes) !== digest) lost.push(`${doc} (${r.status})`);
       }
       check(`all ${expected.size} attachments read back byte for byte, conflict branch included`, lost.length === 0, lost.slice(0, 5).join(", "));
+      const info = JSON.parse((await call(server, "GET", "")).bytes.toString());
+      const page = JSON.parse((await call(server, "GET", "/_all_docs?limit=5")).bytes.toString());
+      check(
+        "doc counts and _all_docs are right on a database written by v0.1.7",
+        info.doc_count === COUNT + 3 && info.doc_del_count === 0 && page.total_rows === COUNT + 3 && page.rows.length === 5,
+        JSON.stringify(info)
+      );
       const attDir = path.join(dataDir, "att", "mig");
       const files = fs.existsSync(attDir) ? fs.readdirSync(attDir) : [];
       const stored = files.filter((f) => /^[0-9a-f]{64}$/.test(f));

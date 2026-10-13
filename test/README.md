@@ -34,6 +34,8 @@
   survive. Needs the release binary (or `NYXDB_BIN`).
 - `perf/` — throughput guards with a wide margin: a 2,000-doc
   `_bulk_docs` (app writes and replication push) must take under 400 ms.
+- `scale/` — `GET /{db}` and `_all_docs` take about as long at 50,000
+  docs as at 2,500.
 - `connections/` — own server (port 8286) with short connection limits:
   header and idle timeouts, the connection cap, and live feeds outliving
   both timeouts.
